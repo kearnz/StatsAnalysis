@@ -1,0 +1,1059 @@
+---
+title: 'Course Project: Statistical Analysis'
+author: "Joseph Kearney"
+date: "3/20/2018"
+output:
+  word_document: default
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list=ls())
+setwd("/Users/josephkearney/Desktop/U_Chicago/Classes/Statistical_Analysis/Class_Project")
+library(lubridate)
+library(scales)
+library(reshape2)
+library(ggplot2)
+library(zoo)
+library(car)
+```
+
+<div style="font-size:28px;color:blue;"> <b>Step 1</b></div>
+
+#### Basic Notes on the Data
+
+We are asked to first read the data and familiarize ourselves with the variables: <br>
+<ul>
+  <li> The first 7 variables (inputs) are the daily records of 7 US Treasury securities' yields to maturity (YTM). </li>
+  <li> The 8th variable is the output column (which we explore later in the project). </li>
+  <li> The 9th and 10th variables are Easing and Tightening columns. Right now their values are NA. </li>
+</ul>
+
+```{r step1plotfunc, include=FALSE}
+# - get the data and add a date column
+AssignmentData<-read.csv("RegressionAssignmentData2014.csv",row.names=1,header=TRUE,sep=",")
+AssignmentData$date <- as.Date(row.names(AssignmentData), "%m/%d/%Y")
+
+# - wrapper to for plots
+treasury.plot <- function(df,cols){
+  # - remove columns we don't need
+  df <- df[,-cols]
+  melted = melt(df, id.vars="date")
+  tplot <- ggplot() + 
+    geom_line(data=melted, aes(x=date, y=value, group=variable, col=variable)) +
+    ylab("YTM") + xlab("Year") + ggtitle("US Treasuries: YTM vs Year") + 
+    theme(legend.position="right") + 
+    scale_color_manual(values=c("red","pink","orange","yellow","green","blue","purple","black"))
+  return(tplot)
+}
+
+tplot.inputs.only <- treasury.plot(AssignmentData,c(8,9,10))
+tplot.inputs.output <- treasury.plot(AssignmentData,c(9,10))
+```
+
+#### Plots for Step 1
+
+For both plots: <br>
+<ul>
+  <li> I created a function to plot data using custom attributes in the ggplot library. </li>
+  <li> Y-axis is YTM, a percent. X-axis is the date, with labels referring to year. Dates help interpret the data more than row numbers do. </li>
+  <li> The legend shows the color of each security plotted. </li>
+</ul>
+
+First, let's plot the <b>input variables only</b>. 
+```{r step1plotinput, include=TRUE}
+
+# Plot of input variables (Treasuries) only
+tplot.inputs.only
+```
+
+#### Interpreting Plot 1
+
+The first plot displays how the YTM of 7 US Treasury securities changes over time and how each Treasury's YTM changes with respect to that of its counterparts along the yield curve. The visualization uncovers a couple interesting patterns in the US Treasury market.
+
+First, <b>every Treasury's YTM has fallen substantially over time, regardless of its maturity</b>. Treasuries of all maturities fell from 13%-16% in the early 1980s to ~10% in 2000 to between 0% and 4% today. This movement represents a quasi-parallel, downward shift in the yield curve over time. From an economic perspective, this downward trend indicates a relatively strong bull market in Treasuries over the past 30-40 years.
+
+Second, <b>each Treasury's rate of change is not the same at any given time</b>. In certain periods, YTM rates on the short end of the curve (<2yr) fall faster than those on the long end (10-30yr). These periods indicate the spread between Treasuries widening (or the yield curve steepening). In other periods (such as those leading up to 1987, 2000, & 2007), rates on the short end of the curve increase much quicker than rates on the long end of the curve. These periods demonstrate the spread between Treasuries tightening (or the yield curve flattening). While the first trend deals with the position of the yield curve, this movement represents the shape of the yield curve. From an economic perspective, the varying shape (flat vs. steep) may indicate investor's expectations about the health of the economy, its direction, and its momentum (or lack thereof).
+
+Next, let's plot the <b>input variables with the output variable</b>. 
+```{r step1plotoutput, include=TRUE}
+# Plot of input variables (Treasuries) and the output column
+tplot.inputs.output
+```
+
+
+#### Interpreting Plot 2
+
+YTM may no longer be an appropriate label for the Y-axis, as we are not sure what the output variable is at this point. Regardless, we can make some initial observations about it from looking at the graph above. The output variable trends similarly over time with YTM of Treasuries. <b>While it rises and falls during the same periods, the output variable is more volatile, and its swings are more pronounced.</b> Additionally, the output value falls well below zero. Because government bond yields should be positive (let's forget about bonds in the EU), we know the output variable is not the yield of one security. 
+
+#### Potential Concerns for Analysis
+
+These plots also raise two red flags we must consider before conducting analysis. 
+
+First, these plots demonstrate that each treasury generally moves in the same direction at the same time even if each changes at different rates. This trend means Treasury YTMs are likely highly correlated. The correlation plot below confirms this suspicion:
+
+```{r step1corrmatrix, include=TRUE}
+(t_cor <- as.matrix(cor(AssignmentData[,c(1:7)])))
+```
+
+Highly correlated inputs may <b>introduce collinearity to our model</b> if we use them as inputs to a multivariate regression. When our input variables are highly correlated, it is hard to distinguish the effect on Output of one Treasuy's YTM from another Treasury's YTM.
+
+Second, a Treasury's YTM may be correlated with its former yields. If we use this type of input as a predictor in a linear model, <b>we then must be cautious about autocorrelation in the resulting residuals of that model.</b> Autocorrelated residuals stem from violation of the OLS assumption that error terms are independent and identically distributed. When violated, an OLS may produce erroneous results for key estimates we use to measure a model's quality and statistical significance.
+
+Based on the graphs, we may be able to predict the output variable from one or a combination of the input variables. While we explore, we keep in mind the correlation between our input variables and potential autocorrelated residuals that could result from our model.
+
+
+<div style="font-size:28px;color:blue;"> <b>Step 2</b></div>
+
+#### Estimate simple regression model with each of the inputs and outputs.
+
+First, let's collect all slopes and intercepts in one table and print this table. 
+```{r onelinecollect, include=TRUE}
+t(apply(AssignmentData[,1:7],2,function(x) lm(Output1~x,data=AssignmentData)$coefficients))
+```
+
+#### Estimation Function
+
+Because this step calls for comparative analysis of 7 different linear models, we need more information about each one. The function below (regression.analyzer) collects and compares more detailed regression statistics for each model. At a high level, this method: <br>
+<ul>
+  <li> takes 1 mandatory parameter (a list of regression objects). </li>
+  <li> takes 2 optional parameters with defaults - column names for the data frame it returns and the name of the regression stats to collect.</li>
+  <li> organizes the collected stats into a data frame that is easy to use. </li>
+  <li> enriches the data frame with each regression's unexplained variance and the output variable's total variance. </li>
+</ul>
+
+```{r linmodelfunc, include=TRUE}
+
+# - Names for the eventual data.frame we will want. 
+# - Created globally as the default names passed to the regression.analyzer function
+simple.names <- c("Int_Estimate","Pred_Estimate","Int_StdError","Pred_StdError","Int_T","Pred_T",
+                  "Int_P-val","Pred_P-val","r.sqr","adj.r.sqr","f.stat","ndf.num","ndf.den","sigma")
+simple.stats <- c("coefficients","r.squared","adj.r.squared","fstatistic","sigma")
+
+# - method to return a dataframe from a list of linear regressions. USED IN 2 AND 3
+regression.analyzer <- function(l.of.regs, stats = simple.stats, df.colnames = simple.names){
+  
+  # - helper function to extract the info we want from a regression model. We then extract stats of interest.
+  simple.extractor <- function(extract) t(sapply(l.of.regs,function(l) summary(l)[[extract]]))
+  simple.model.data <- sapply(stats,simple.extractor)
+  
+  # - prep the data we've extracted so that it plays nicely with a data.frame. Enrich the dataframe as well.
+  simple.model.prep <- lapply(simple.model.data,function(i) if(nrow(i)==1) t(i) else i) 
+  simple.model.df <- setNames(data.frame(simple.model.prep),df.colnames)
+  simple.model.df["total.var"] <- var(AssignmentData[,8])
+  if ("sigma" %in% names(simple.model.df)) simple.model.df["unexpl.var"] <- simple.model.df$sigma^2
+  return(round(simple.model.df, 3))
+}
+```
+
+#### Results from Estimation Function
+
+Let's test this function above on our Assignment Data by passing a list of regression objects. 1 for each explanatory variable.
+
+```{r step2regresults, include=TRUE}
+# - generate the regression models and store them in a list
+simple.reg.models <- lapply(AssignmentData[,1:7], function(x) lm(Output1~x,data=AssignmentData))
+(step2.models <- regression.analyzer(simple.reg.models))
+```
+
+A quick note on the data frame column naming convention above:<br>
+<ul>
+  <li> Each row in the data frame is one of seven linear models. The column values are estimates from each lm. </li>
+  <li> "Int" refers to intercept, while "Pred" refers to predictor. These columns are the lm's coefficient estimates. </li>
+  <li> Columns without a prefix (such as f.stat) represent a model estimate. </li>
+</ul>
+
+#### Visualizing Model Fit
+
+We can visually explore how well each regression predicts the output. Below are 7 plots for each regression's fit vs. the ouptut varibale.
+
+```{r step2plots, include=TRUE}
+plot.simple.regs <- function(reg,title.name){
+  matplot(AssignmentData[,8],type="l",xaxt="n",main=title.name)
+  lines(reg$fitted.values,col="red")
+}
+
+mapply(plot.simple.regs,simple.reg.models,names(simple.reg.models))
+```
+
+#### Commentary and Analysis - The Raw Stats and Plots
+
+Each model has a postive regession coefficient estimate for $\hat{B}_1$, with the predictor's coefficient increasing for Treasuries with longer maturities. The models suggest that a one unit increase in YTM will increase our Output by a factor of roughly 2.5 to 3, depending on the model. Additionally, each model's predictor coefficient is quite significant. Their t-statistics are extremely large, and the p-value from those t-tests is 0. Therefore, getting our predictors' coefficient values could not have happened by chance. Each model's F-statistic confirms the significance of its predictor. Their F-statistics and corresponding p-values lead us to reject each model's null-hypothesis and conclude that it provides a better fit than its corresponding intercept-only model. Lastly, each model has an adjusted $R^2$ value above .9, with the 3yr adjusted $R^2$ > .99. These values suggest that each model captures an extremely high proportion of the variance in the Output, leaving almost no unexplained variance.
+
+Each model predicts the output variable well, but the 3yr UST does the best job while the extremes (3m and 30yr) perform the worst.  The 3yr has the highest adjusted $R^2$ and the largest t-value and F-statistic. Therefore, it seems to predict the output variable the best. The plot of its fitted values confirm its fit. This plot makes the model fitted values and the Output variable seem indistinguishable. 
+
+This outcome is in line with my expectations. I figured that the best fit would likely be somewhere in the middle of the curve, either the 3yr or 5yr USTs. This maturity range is the belly of the Treasury yield curve. It is also the portion of the yield curve where rate fluctuations can be the most volatile. Given that the Output is extremely volatile, I reasoned the 3yr or 5yr would have the best chance to explain the Output's variance and thus provide a superior fit.
+
+#### Commentary and Analysis - Model Criticism
+
+The results from the models should make us quite suspicious. The models are essentially perfect fits of the Output variable, explaining nearly all its variance. The T and F statistics seem abnormally inflated as well.
+
+In step 1, I mentioned that dependent error terms violate an important assumption of OLS and can result in dependent residuals. When residuals are correlated, model estimates may underestimate or overestimate their true value.
+
+Let's explore our residuals with a couple of plots from the 3yr UST model, which supposedly performs the best.
+
+```{r step2residplot, include=TRUE}
+plot(simple.reg.models$USGG3YR$residuals)
+abline(h=0,col="red")
+acf(simple.reg.models$USGG3YR$residuals)
+```
+
+The pattern shown in the first plot represents positive autocorrelation among residuals. The ACF plot confirms this pattern. Autocorrelation among residuals violates an OLS assumption from the start, so the model's results may be erroneous. In this case, positive autocorrelation underestimates the true variance of each regression coefficient $\hat{B}_1$. When underestimated, then the coefficient's standard error is artificially small as well. An artificially small standard error inflates the coefficient's t-statistic, f-statistic, and $R^2$ value. As a result, the model's true predictive power suffers because we can't trust the statistics we use to assess that power in the first place.
+
+#### Conclusion
+
+Our simple linear regressions should not be trusted. While the results seem attractive, we've violated a key assumption of OLS. Because of this violation, estimations are inaccurate, and in our case, this inaccuracy inflates key indicators of a model's statistical significance. This inaccuracy increases chances of Type I error (incorrectly rejecting the null hypothesis that the predictor's coefficient is not different from 0).
+
+<div style="font-size:28px;color:blue;"> <b>Step 3</b></div>
+
+#### Estimate simple models where the output is now the predictor and each input is the dependent variable.
+
+First, let's collect all slopes and intercepts in one table and print this table. 
+```{r step3apply, include=TRUE}
+t(apply(AssignmentData[,1:7],2,function(x) lm(x~Output1,data=AssignmentData)$coefficients))
+```
+
+#### Results from Estimation Function
+
+Now, let's use the function created in step 2 to print more details regarding the new set of linear models.
+```{r step3morestats, include=TRUE}
+#- generate reverse regression list
+simple.reg.models.reversed <- lapply(AssignmentData[,1:7], function(x) lm(x~Output1,data=AssignmentData))
+(step3.models <- regression.analyzer(simple.reg.models.reversed))
+```
+
+#### Analysis of new Models and Differences from Step 2
+
+The new linear models regress the Output variable on each of the inputs, creating 7 new linear models. The data from these linear models exhibit similar results as Step 2 with a few key differences. 
+
+First, briefly touching on similarities:
+<ul>
+  <li> The coefficient's t-statistic and resulting p-value indicate slopes are statistically significant. </li>
+  <li> The model's F-statistic leads us to reject the null hypothesis, concluding the predictor model is superior. </li>
+  <li> The adjusted $R^2$ demontrates each model captures almost all the variance in the dependent variable. </li>
+  <li> 3yr still the best performer, with 3m and 30yr lagging slightly. </li>
+</ul>
+
+Now, the main differences:
+<ul>
+  <li> First, the regression coefficient for $\hat{B}_1$ are all well below 1. This should make sense. The Output variable is far more volatile than the input variables. Therefore, large moves in the Output variable correspond to positive, but less pronounced moves in the input variables.</li>
+  <li>Second, the unexplained variance is much lower than those seen in the models from Step 2. In fact, the model with the 3yr UST as the output variable has essentially no unexplained variance.</li>
+</ul>
+
+
+#### Conclusion
+
+Step 2 shows clear violation of OLS assumptions. Step 3 contains these violations as well, and the results are even more abnormal. The absence of unexplained variance also makes these models less interesting. Because the Ouput essentially explains all the variance in each of the UST YTMs, I'm suspicious that the Output variable is simply some linear combination of the input variables or the result of some linear transformation mapping the input variables to the Output. Overall, we conclude that a simple OLS model may not be an appropriate measure for our data.
+
+<div style="font-size:28px;color:blue;"> <b>Step 4</b></div>
+
+#### Logistic Regression - A Quick Note on What We're Trying to Do
+
+Historically there are periods where the spreads between Treasuries tighten and periods where they ease. We model two logistic regressions to examine if we can predict whether the spread between UST YTMs is tightening (1) or easing (0). The first model uses a single Treasury (the 3m), while the second model uses all the Treasuries in our dataset.
+
+In logistic regression, change in probalility is not constant. Therefore, this analysis looks at odds ratios instead.
+
+```{r step4code, include=FALSE}
+AssignmentDataLogistic<-data.matrix(AssignmentData,rownames.force="automatic")
+AssignmentDataLogistic
+EasingPeriods<-AssignmentDataLogistic[,9]
+EasingPeriods[AssignmentDataLogistic[,9]==1]<-0
+TighteningPeriods<-AssignmentDataLogistic[,10]
+# Check easing and tightening periods
+cbind(EasingPeriods,TighteningPeriods)[c(550:560,900:910,970:980),]
+All.NAs<-is.na(EasingPeriods)&is.na(TighteningPeriods)
+AssignmentDataLogistic.EasingTighteningOnly<-AssignmentDataLogistic
+AssignmentDataLogistic.EasingTighteningOnly[,9]<-EasingPeriods
+AssignmentDataLogistic.EasingTighteningOnly<-AssignmentDataLogistic.EasingTighteningOnly[!All.NAs,]
+AssignmentDataLogistic.EasingTighteningOnly[is.na(AssignmentDataLogistic.EasingTighteningOnly[,10]),10]<-0
+AssignmentDataLogistic.EasingTighteningOnly <- AssignmentDataLogistic.EasingTighteningOnly[,-11]
+```
+
+#### Easing and Tightening Plot
+
+First, plot the easing and tightening periods. Steps taken to prepare plot below:
+<ul>
+  <li> Isolate the easing and tigthening periods in the Assignment data. </li>
+  <li> Code easing periods as 0 and tightening periods as 1. </li>
+  <li> Plot the Assignment data filtered down to easing and tightening periods. </li>
+  <li> Represent easing and tightening periods with red line. </li>
+</ul>
+
+```{r step4plot, include=TRUE}
+matplot(AssignmentDataLogistic.EasingTighteningOnly[,-c(9,10)],type="l",ylab="Data and Binary Fed Mode")
+lines(AssignmentDataLogistic.EasingTighteningOnly[,10]*20,col="red")
+```
+
+#### Logistic Regression for 3M UST
+
+```{r step43m, include=TRUE}
+s4 <- AssignmentDataLogistic.EasingTighteningOnly
+LogisticModel.TighteningEasing_3M <- glm(s4[,10]~s4[,1],family=binomial(link=logit))
+summary(LogisticModel.TighteningEasing_3M)
+matplot(AssignmentDataLogistic.EasingTighteningOnly[,-c(9,10)],type="l",ylab="Data and Fitted Values")
+lines(AssignmentDataLogistic.EasingTighteningOnly[,10]*20,col="red")
+lines(LogisticModel.TighteningEasing_3M$fitted.values*20,col="green")
+```
+
+#### Analysis of 3M Logistic Regression
+
+This model attempts to predict whether Treasury spreads are tightening or easing using the 3m UST YTM only. The model's coefficient is significant, but logits are hard to interpret. So let's convert the coefficient to an odds ratio to better understand what it means:
+
+```{r 3mconversion, include=TRUE}
+exp(cbind(ratio = coef(LogisticModel.TighteningEasing_3M), confint(LogisticModel.TighteningEasing_3M)))
+```
+
+Given that $e^0 = 1$, an odds ratio of 1 indicates no effect on the response from the predictor. The 3 month's odds ratio is 1.20, which implies that a one unit will increases the odds of tightening by a factor of 1.20. While this relationship is positive, the 3m's predictive power seems weak.
+
+The difference between the null and residual deviance further confirms the weakness of this logistic regression. The null deviance is very high, and the residual deviance makes very minor improvements. Thus, adding 3m to the model does not significantly improve our ability to predict tightening.
+
+This weakness should make sense. Periods of tightening and easing arise when <b> Treasury YTMs move at different rates</b>. It's hard to predict whether spreads are tightening or easing when looking at the behavior of only one UST YTM.
+
+#### Logistic Regression for All UST
+
+```{r s4allplot, include=TRUE}
+LogisticModel.TighteningEasing_All<-glm(s4[,10]~s4[,1]+s4[,2]+s4[,3]+s4[,4]+s4[,5]+s4[,6]+s4[,7],
+                                    family=binomial(link=logit))
+summary(LogisticModel.TighteningEasing_All)
+matplot(AssignmentDataLogistic.EasingTighteningOnly[,-c(9,10)],type="l",ylab="Results of Logistic Regression")
+lines(AssignmentDataLogistic.EasingTighteningOnly[,10]*20,col="red")
+lines(LogisticModel.TighteningEasing_All$fitted.values*20,col="green")
+```
+
+#### Analysis of All Inputs Logistic Regression
+
+First, note that all coefficients are significant except for one, the 10yr UST. Again, let's look at odds instead of probabilites:
+
+```{r allconversion, include=TRUE}
+exp(cbind(ratio = coef(LogisticModel.TighteningEasing_All), confint(LogisticModel.TighteningEasing_All)))
+```
+
+Coefficients with negative logit values correspond to odds ratios below 1. Again, this makes sense, given that $e^0 = 1$. An odds ratio below 1 indicates a negative relationship between a Treasury's YTM and the odds of tightening. These odds ratios are more interesting than the 3m only model, but they seem to make matters more complicated. The 3m had a positive (albeit weak) relationship with the likelihood of tightening. Now, the 3m relationship is very negative, while the 6m is substantially positive. The high correlation among Treasuries may make it hard to decipher which one has the strongest impact on the response, and it may make coefficients themselves extremely unstable when we add more predictors to said models. In this example, the 3m changes significantly when we introduce additional inputs.
+
+The logistic regression with all Treasuries provides more information, but it is still not that powerful. Our Residual Deviance has dropped more significantly than the 3m model's, but the difference from the null model is still pretty small.
+
+#### Comparison between the Two Models
+
+The model with all the Treasuries performs better than the 3m model. This seems fair, as one Treasury's movement alone makes it hard to predict tightening/easing, which relies on the relationship between the movement of Treasuries against each other. The "all inputs" model has a larger difference in deviances, and its AIC score is lower than the 3m model, so we can conclude that it is likely the better predictor of tightening/easing.
+
+#### Achieving our Goal
+
+At this point, we've simply compared the results of two logistic regressions. We can conclude that one is better than the other, but we need to check if either are appropriate for achieving our goal: predicting tightening and easing periods. Let's break down each model's performance.
+
+First, let's look at class membership: easing = 0, tigthening = 1
+
+```{r nullmodel, include=TRUE}
+# - ANALYSIS RESULTS
+round(rbind(table(s4[,10]),table(s4[,10])/length(s4[,10])),3)
+
+```
+
+The sample size is 2358. Of that sample, only 773 (~32.8%) records represent tigthening. Therefore, the baseline model should accurately classify easing or tightening ~67% of the time if it naively assumes easing in every case. 
+
+The null model demonstrates that baseline:
+
+```{r achievinggoal, include=TRUE}
+# - create the base case
+LogisticModel.TighteningEasing_null<-glm(s4[,10]~1,family=binomial(link=logit))
+
+# - create confusion matrix and display the accuracy of the model
+confusion.matrix <- function(logit.reg,conf.vect=s4[,10]){
+  pred <- predict(logit.reg, type = 'response')
+  confusion <- table(conf.vect, pred > 0.5)
+  return(list("confusion" = confusion, accuracy = sum(diag(confusion)) / sum(confusion)))
+}
+
+confusion.matrix(LogisticModel.TighteningEasing_null)
+```
+
+As expected, the null model simply predicts everything is easing. As a result, it correctly classifies 1585 records as easing when they are easing, but it incorrectly classifies 773 records as easing when they are, in fact, tightening. As a result, the <b> null model's accuracy is ~67%</b>.
+
+Given that random chance yields an accuracy of 67%, a predictive model should not perform worse. Let's check how the 3m and "all input" models perform:
+
+```{r checkallmodels, include=TRUE}
+confusion.matrix(LogisticModel.TighteningEasing_3M)
+confusion.matrix(LogisticModel.TighteningEasing_All)
+```
+
+Not good. The 3m model <b> actually did worse than the baseline model </b>. It incorrectly guessed that some easing periods were actually tightening periods. Even worse, it did not detect any of the tightening periods, classifying them all as easing. 
+
+The "all input" model did slightly better. <b> Its accuracy was ~71%, but that is only slightly better than chance! </b> We went through a lot of effort to improve 3-4% in accuracy. 
+
+#### Conclusion
+
+Whether or not we achieved our goal depends on context. If we strive to improve accuracy only, the "all input" model technically succeeds. It predicts at least some of the tightening periods, and in our case, predicting some tightening is better than predicting none. 
+
+But in other areas, improvements in accuracy may come at the costs of false positives and false negatives. What if these numbers represented convictions in criminal court? In that case, the "all inputs" model wrongly convicts 141 people to simply improve the accuracy of its conviction rate by ~3 or 4%. That seems like a steep price to pay for marginal gains.
+
+Ultimately, context matters. In this context, the model predict some tigthening periods, which is better than none. But either way, it still did a pretty bad job. Therefore, we have not really achieved much using a logistic regression to predict periods of tightening and easing. 
+
+<div style="font-size:28px;color:blue;"> <b>Step 5</b></div>
+
+We've evaluated simple and logistic regressions. Now, we evaluate what combination of inputs produces the "best" model in multiple regression. 
+
+#### Estimating the Full Model with All 7 Predictors
+
+```{r all7predictorsprep, include=FALSE}
+AssignmentDataRegressionComparison<-data.matrix(AssignmentData[,-c(9,10,11)],rownames.force="automatic")
+AssignmentDataRegressionComparison<-AssignmentData[,-c(9,10,11)]
+```
+```{r all7predictormodel, include=TRUE}
+full.model <- lm(Output1~.,data=AssignmentDataRegressionComparison)
+summary(full.model)
+sapply(c("r.squared","adj.r.squared","df"),function(i) summary(full.model)[[i]])
+```
+
+When we regress Output1 on all 7 Treasuries, the model is a perfect fit. $R^2$ and adj. $R^2$ equal 1, so the model explains the entire variance in the Output variable. A perfect $R^2$ is guaranteed if we have the same number of predictors as observations (minus 1 if intercept included), but in this model, we still have 8292 degrees of freedom in the residuals. Since the predictors account for only 8 degrees of freedom, why is the fit perfect?
+
+```{r whyperfectfit, include=TRUE}
+full.model.intercept <- full.model$coefficients[1]
+full.model.weights <- as.matrix(full.model$coefficients[2:length(full.model$coefficients)])
+first.five.days <- as.matrix(AssignmentDataRegressionComparison[1:5,1:7]) %*% full.model.weights + full.model.intercept
+first.five.example <- cbind(first.five.days,AssignmentDataRegressionComparison$Output1[1:5])
+colnames(first.five.example) <- c("linear.combo.of.inputs","output")
+first.five.example
+round(sum(full.model$fitted.values - AssignmentDataRegressionComparison$Output1),5)
+```
+
+The Output variable is a linear combination of the 7 inputs and intercept. The input matrix is overdetermined (8300 x 8 w/ the intercept), so the matrix equation $Ax = b$ has 0 or 1 solutions for a given vector $b$. In this case, the Output vector exists in the column space of the input Matrix, so we find a unique solution. Therefore, <b>the Output vector is a linear combination of our intercept and each of the 7 treasuries</b>. We need 8 dimensions to perfectly fit the Output vector, so $R^2$ and adj. $R^2$ equal 1 even though 8292 degrees of freedom remain in residuals.
+
+At this point, we have a better idea of what the Output column is based on its relationship with the inputs. That being said, we can't really explain the Output yet other than saying it's a linear combination. In the final steps, we'll come to a more contrete conclusion.
+
+#### Estimating the Null Model
+
+Now that we've fit the full model and each individual model, let's fit the null model:
+
+```{r step5nullmodel, include=TRUE}
+null.model <- lm(Output1~1,data=AssignmentDataRegressionComparison)
+summary(null.model)
+sapply(c("r.squared","adj.r.squared","df"),function(i) summary(null.model)[[i]])
+```
+
+The null model is a base model. With no predictors, the intercept above is $\bar{Y}$, or the mean of the Output. As a coefficient, it is not significant because it is simply a mean - an estimate from $Y$ but not a predictor of $Y$. The fitted values from the model above form a straight line through $\bar{Y}$ for every point on the X-axis. This straight line helps visualize why the model does not display $R^2$ or adjusted $R^2$, because both of these values are 0, as shown below:
+
+<ul>
+  <li>All the fitted values ( $\hat{y}$ ) equal $\bar{y}$ since the regression line is a straight line at $\bar{y}$.</li>
+  <li>Therefore, $SSE = SST$ because $\sum{(y-\hat{y})^2} = \sum{(y-\bar{y})^2}$</li>
+  <li>As a result, $R^2 = 1 - \frac{SSE}{SST} \rightarrow 1 - 1 = 0$ </li>
+  <li>I won't go into the equation, but when $R^2 = 0$, adjusted $R^2 = 0$ as well.</li>
+</ul>
+
+#### Compare each Model using ANOVA
+
+```{r anovastep5, include=TRUE}
+anova(full.model,null.model)
+```
+
+The ANOVA table above compares two regressions which both share the same Output variable but have a different number of predictors. The null model has no predictors, while the full model has 7. The "Df" column of the ANOVA table displays this difference. Next, observe the difference in residual sum of squares between the two models. The full model is a perfect fit, so its RSS is 0, while the null model explains none of the variance in $Y$, so its RSS is extremely large. 
+
+The F-test and associated p-value are significant. This significance indicates that the additional coefficients in the first model explain significantly more variance in $Y$. Thus, we can reject the null hypothesis and conclude that the two models are not the same.  
+
+#### Fitting the Optimal Model
+
+So far, we've seen:
+<ul>
+  <li> Simple OLS models, predicting the Output variable from each UST's YTM.</li>
+  <li> The reverse models, predicting each UST's YTM from the Output variable.</li>
+  <li> The null model, which explains none of the Output's variance.</li>
+  <li> The full model, which explains all of the Output's variance.</li>
+</ul>
+
+To figure out what the best model is, let's review what the best model is <b> NOT </b>:
+
+<div><em><b> The Full Model </em></b></div>
+<ul>
+  <li>The Output variable exists in the columnspace of our 7 inputs and intercept.</li>
+  <li>Therefore we know what the Ouput will be for any given input values, and we know the inputs for any given Output value.</li>
+  <li>As a result, the full model contains redundant information, and there is no need for a model at all b/c there is nothing to predict.</li> 
+</ul>
+<div><em><b> The Null Model </em></b></div>
+<ul>
+  <li>The null model is simply the mean of the Output, and it exlpains no variance in $Y$.</li>
+  <li>Similarly to the full model, the null model has nothing to predict. It displays a flat line for every value of $X$.</li>
+  <li>The null model is a base case to reference how much variance exists in Y, but it has no predictive value.</li> 
+</ul>
+<div><em><b> Simple OLS Models </em></b></div>
+<ul>
+  <li>Simple OLS models do not fit the data perfectly, so there is some notion of a "best fit" when comparing them to each other.</li>
+  <li>Simple OLS models, however, violate a key assumption of OLS, so we cannot necessarily trust their results.</li>
+  <li>An invalid model cannot be a candidate for the "best model".</li> 
+</ul>
+<div><em><b> A Multivariate Regression with more than 1 but less than 7 Inputs. </em></b></div>
+<ul>
+  <li>There are $2^7$ possible combinations of input variables, so it may be tempting to try them all and compare results.</li>
+  <li>These models will still violate the assumption of independent errors, however, and they may introduce multicollinearity too.</li>
+  <li>The 3y already explains 99% of the variance in the Output, so there's not much need to test additional variables using a step-wise regression. We already know any additional input after the 3yr does little to help the model.</li> 
+</ul>
+
+Now, let's discuss what the best model <b> COULD BE </b>:
+
+The optimal model will not violate OLS assumptions. Therefore, we need a model where the residuals are independent. Additionally, if our model uses multiple predictors, we need them to have as little correlation as possible. We will want to satisfy both of these OLS assumptions but still produce a statistically significant result.
+
+<div><em><b> An Example: The Simple Difference Model </b></em></div>
+
+The model below regresses the change in the Output variable from the change in the 3yr UST YTM, which was previously the best predictor in any simple linear model. The summary results show a statistically signficant values from the t-test and F-statistic. Additionally, the $R^2$ is quite high, so our model captures a significant portion of the Output's variance. While these estimates are lower than the original 3yr model, we must remember that the original model's estimates were inflated. Our new model does not violate key assumptions of OLS, so we can trust its results. Therefore, the first "difference model" is much more robust than any of our original simple linear regressions.
+
+```{r option1diffmodel, include=TRUE}
+diff.3yr <- lm(diff(Output1)~diff(USGG3YR),data=AssignmentData)
+summary(diff.3yr)
+plot(diff.3yr$residuals)
+abline(h=0,col="red")
+acf(diff.3yr$residuals)
+matplot(diff(AssignmentData[,8]),type="l",xaxt="n",main="Diff Plot")
+lines(diff.3yr$fitted.values,col="red")
+
+```
+
+<div><em><b> Further Example: Time Series Models </b></em></div>
+
+This evaluation sticks to simple and multivariate OLS regressions, attempting to demonstrate that we can improve upon the models in Steps 1-3 without adding much complexity or using more advanced techniques. That being said, a number of models out of scope for this analysis should be explored. These include specific time series models that are geared toward time series data. 
+
+<div style="font-size:28px;color:blue;"> <b>Step 6</b></div>
+
+#### Plot of the Rolling Mean Graph
+
+A quick note on what the graph below plots:
+<ul>
+  <li>Take the mean of every 20 day window, shifting the window 5 days.</li>
+  <li>Insert the mean value in the center of its window, with surrounding values NA.</li>
+  <li>The result will be the mean of each window, every 5 days (first mean after 10 days)</li>
+  <li>Plot the means for the 3m as red dots, then plot a black line with the actual 3m YTM.</li>
+</ul>
+
+```{r rollapplycodeforgraph1, include=FALSE}
+Window.width<-20; Window.shift<-5
+# - rolling window, mean by period (in this case 20 days)
+all.means<-rollapply(AssignmentDataRegressionComparison,width=Window.width,by=Window.shift,by.column=TRUE, mean)
+
+Count<-1:length(AssignmentDataRegressionComparison[,1])
+# - values where rolling means are calculated. I.e. 1-20 in row 1, 6-25 in row 2, etc.
+Rolling.window.matrix<-rollapply(Count,width=Window.width,by=Window.shift,by.column=FALSE,
+                                 FUN=function(z) z)
+
+# Take middle of each window
+Points.of.calculation<-Rolling.window.matrix[,10]
+
+# Incert means into the total length vector to plot the rolling mean with the original data
+Means.forPlot<-rep(NA,length(AssignmentDataRegressionComparison[,1]))
+Means.forPlot[Points.of.calculation]<-all.means[,1]
+```
+
+```{r rollapplygraph1,include=TRUE}
+plot(Means.forPlot,col="red")
+lines(AssignmentDataRegressionComparison[,1])
+```
+
+#### Plot the Rolling Standard Deviation
+
+The code below does the following:
+<ul>
+  <li> Generates a matrix with the difference between YTM for each day, which removes one row for first day. </li>
+  <li> Create a new dataset with the rolling window standard deviation. Similar to above but with sd. </li>
+  <li> Get the appropriate dates that correspond to the rolling window, removing the first date. </li>
+  <li> Generate the resulting plot for the 3m, 5yr, 30yr, and Output variable. </li>
+</ul>
+
+```{r dailydifferencetable, include=TRUE}
+
+# daily differences first
+dailydiff <- diff(as.matrix(AssignmentDataRegressionComparison))
+head(dailydiff)
+
+# standard deviation rolling window second
+rolling.sd <- rollapply(dailydiff,width=Window.width,by=Window.shift,by.column=TRUE, sd)
+head(rolling.sd)
+
+# dates table third
+rolling.dates<-rollapply(AssignmentDataRegressionComparison[-1,],width=Window.width,by=Window.shift,
+                         by.column=FALSE,FUN=function(z) rownames(z))
+
+rownames(rolling.sd)<-rolling.dates[,10]
+
+# generate the plots
+matplot(rolling.sd[,c(1,5,7,8)],xaxt="n",type="l",col=c("black","red","blue","green"))
+axis(side=1,at=1:1656,rownames(rolling.sd))
+```
+
+#### Show periods of high volatility.
+
+```{r highvol, include=TRUE}
+# Show periods of high volatility
+high.volatility.periods<-rownames(rolling.sd)[rolling.sd[,8]>.5]
+high.volatility.periods
+```
+
+#### How is volatility related to the level of rates?
+
+To answer this question, let's look at a couple of the high volatility days in our dataset.
+
+```{r highvolperiods, include=TRUE}
+high.vol.days.of.interest <- c("4/30/1981","7/29/1982","10/20/1987","11/19/2007","11/19/2008")
+AssignmentData[high.vol.days.of.interest,1:8]
+```
+
+As evidenced above, volatility does not have to do with the actual level of rates or the spread between treasury YTM's. Rather, volatility has to do with how quickly <b>rates are moving over a specified period of time</b>. In our case, we define volatile as 20-day periods where the standard deviation of the Output variable is greater than 0.5. Standard Deviation is a measure of dispersion in a data set. Because we know the output variable is a linear combination of the 7 UST YTM's, we define volatility as a period in which Treasury YTM's are on the move.
+
+In our case, volatility could represent:
+<ul>
+  <li> A parallel shift in the yield curve (i.e. a black swan event that affects all US treasury rates) </li>
+  <li> A dramatic steepening or flattening of the yield curve (i.e. investors changing expectation of inflation) </li>
+  <li> A change in the curvature of the yield curve (i.e. the belly of the curve moving quickly) </li>
+</ul>
+
+The yield curve overall is pretty stable. Periods of volatility are generally grouped together within the same few months. These periods occur when the US economy is not in equilibrium, such as the housing market crash in 2007 or the market crash in 1987.
+
+#### Look at pairwise X-Y plots of regression coefficients for the 3M, 5Yr and 30Yr yields as inputs.
+
+```{r pairwiseplotscode, include=FALSE}
+# Rolling lm coefficients
+Coefficients<-rollapply(AssignmentDataRegressionComparison,width=Window.width,by=Window.shift,by.column=FALSE,
+         FUN=function(z) coef(lm(Output1~USGG3M+USGG5YR+USGG30YR,data=as.data.frame(z))))
+rolling.dates<-rollapply(AssignmentDataRegressionComparison[,1:8],width=Window.width,by=Window.shift,by.column=FALSE,
+                         FUN=function(z) rownames(z))
+
+rownames(Coefficients)<-rolling.dates[,10]
+```
+
+```{r pairwiseplots, include=TRUE}
+# Pairs plot of Coefficients
+pairs(Coefficients)
+```
+
+#### Interpret the Pairwise Plots
+
+Basic notes on the pairwise plots:
+<ul>
+  <li>The coefficients are all continuous variables, so pairwise plots visualize relationships between coefficients.</li>
+  <li>Each point in the pairs plot represents a coefficient in a linear model during a rolling period.</li>
+  <li>The plot's diagonal represents the coefficient names.</li>
+  <li>Plots to the left and right of the diagonal take the Y-axis, while plots above and below take the X-axis.</li>
+  <li>Each plot is a scatter between two of the coefficients on the diagonal.
+</ul>
+
+The first interesting note is the <b>range and spread of each cofficient over time.</b>
+
+```{r statsonpairwiseplot, include=TRUE}
+Coeff.list <- Coefficients
+lapply(c("min"=min,"max"=max,"mean"=mean),function(f) apply(Coeff.list,2,f))
+```
+
+In general, the 3m and 30yr coefficients range from -1 to 2. This range indicates that the 3m and 30yr are positively correlated with the Output variable in some rolling windows and a negatively correlated in others. The 5yr, on the other hand, almost always has a positive relationship with the Output variable. On average, it tends to have the highest impact on the Output variable, as seen by its mean above. Next, the 3m's coefficient distribution seems to have much fatter tails than those of the 5yr and 30yr.
+
+The next interesting observation is the <b>relationships between each set of coefficients.</b> First, the correlation between the 5yr and 30yr coefficients is strongly negative. The 5yr has the most positive influence in linear models where the 30yr has the most negative influence (and vice versa). Next, the 3m's coefficient seems largely independent of the 5yr and the 30yr.
+
+#### Plot the coefficients. Show periods.
+
+```{r plotcoeffshowperiods, include=TRUE}
+# Plot of coefficients
+matplot(Coefficients[,-1],xaxt="n",type="l",col=c("black","red","green"))
+axis(side=1,at=1:1657,rownames(Coefficients))
+
+```
+
+#### Is the picture of coefficients consistent with the picture of pairs? If yes, explain why.
+
+The coefficient line plot is consistent with the picture of pairs based on my observations:
+<ul>
+  <li> The 5yr coefficient, on average, has the most positive influence on the Output variable.</li>
+  <li> Peaks in the 30yr tend to coincide with lows in the 5yr, demonstrating their negative relationship.</li>
+  <li> Both plots identify outliers clearly, although the line plot enriches that information with when outliers occur.</li>
+  <li> The 3m "fatter tails" come from its increase in variance over time. It swings wildly after March 2000.</li>
+</ul>
+
+Each plot has strengths and weaknesses. The line plot demonstrates how the variance of each coefficient changes over time, and it clearly shows the positive influence of the 5yr coefficient. The pairs plot, on the other hand, is much better for observing the relationship between coefficients.
+
+#### Plot the rolling R^2 values
+
+```{r rollingR2data, include=FALSE}
+# R-squared
+r.squared<-rollapply(AssignmentDataRegressionComparison,width=Window.width,by=Window.shift,by.column=FALSE,
+         FUN=function(z) summary(lm(Output1~USGG3M+USGG5YR+USGG30YR,data=as.data.frame(z)))$r.squared)
+r.squared<-cbind(rolling.dates[,10],r.squared)
+r.squared[1:10,]
+```
+
+```{r rollingR2plot, include=TRUE}
+plot(r.squared[,2],xaxt="n",ylim=c(0,1))
+axis(side=1,at=1:1657,rownames(Coefficients))
+(low.r.squared.periods<-r.squared[r.squared[,2]<.9,1])
+```
+
+#### What could cause decrease of R^2?
+
+We know that a combination of all 7 UST YTM's (and an intercept) fit the Output perfectly. But when we use 3 UST YTMs only and restrict the time frame for analysis, the $R^2$ value of a model will fluctuate dependending on how well the 3 inputs explain the Output's variance during that rolling time window. In an extreme example, let's assume that the 3m, 5yr, and 30yr are all zero (or held constant) for a 20 day period, while the remaining 4 UST YTMs and thus the Output continue fluctuating. In this case, the model would be insignificant because its inputs would not explain any of the variance in the Output during that time window. This extreme example applies to less extreme scenarios as well. 
+
+To help visualize the concept above, let's explore the fit of the 3m UST vs the 10yr UST in the different time frames:
+
+```{r exampleR2, include=TRUE}
+example.r2 <- cbind(rbind(summary(lm(Output1~USGG3M,AssignmentData))$r.squared,
+                          summary(lm(Output1~USGG3M,AssignmentData[7000:8300,]))$r.squared),
+                          rbind(summary(lm(Output1~USGG10YR,AssignmentData))$r.squared,
+                          summary(lm(Output1~USGG10YR,AssignmentData[7000:8300,]))$r.squared))
+
+rownames(example.r2) <- c("all-time","last ~5 years")
+colnames(example.r2) <- c("3M UST R^2","10Y UST R^2")
+example.r2
+```
+
+Over the course of 30-40 years, the 3m and the 10yr fit the Output variable almost perfectly. Yet in the last ~5 years, the 3m has an extremely low $R^2$, while the 10yr fits the data even better than it does over the course of the 30-40 year history. This observation has to do with context. Over the past 5-7 years, the 3m UST YTM has been essentially pinned at 0, while more distant maturity YTMs such as the 10yr have continued to fluctuate. Therefore, while the 3m is a good predictor of the Output overall, it is not a good predictor right now. <b>Dips in $R^2$ in the graph above result from context as well.</b> These dips are 20 day windows where the 3m, 5yr, and 30yr were not moving as much as they usually do in relation to their peers, and thus USTs not in the model explain more of the Output's variance than they normally do. 
+
+#### Plot the rolling p-values
+
+```{r plotrollingpvalues, include=FALSE}
+# P-values
+Pvalues<-rollapply(AssignmentDataRegressionComparison,width=Window.width,by=Window.shift,by.column=FALSE,
+                        FUN=function(z) summary(lm(Output1~USGG3M+USGG5YR+USGG30YR,data=as.data.frame(z)))$coefficients[,4])
+rownames(Pvalues)<-rolling.dates[,10]
+Pvalues[1:10,]
+```
+
+```{r plotrollingpvaluesplot, include=TRUE}
+matplot(Pvalues,xaxt="n",col=c("black","blue","red","green"),type="o")
+axis(side=1,at=1:1657,rownames(Coefficients))
+```
+
+#### Analyze the rolling p-values plot.
+
+Basic notes on the plot:
+<ul>
+  <li> The plot charts the p-values for the 3m, 5yr, and 30yr in each rolling window regression.</li>
+  <li> Blue = 3m, Red = 5yr, Green = 30yr. X-axis is the date and Y-axis is the p-value of each coefficient.</li>
+</ul>
+
+The p-values plot identifies which coefficients are significant in each multiple linear regression. It also complements the other plots in this section nicely and exposes the issue with multicollinearity. 
+
+Over time, the 5yr coefficient is consistently significant, with the exception of a few periods (~1987 and ~2000). This trend is also consistent with our line graph, which demonstrates the 5yr's continuously positive influence over time. 
+
+In this plot, the 3m becomes less and less significant in models as time goes on, demonstrated by its string of high p-values from ~2008 onward. This trend is consistent with the experiment in the $R^2$ analysis section. The 3m has been pegged near 0 for quite some time. Therefore, it is not surprising that the 3m's coefficient is often not statistically significant from 0, as evidenced by its high p-values in the rolling p-values plot.
+
+Next, the 30yr generally lacks influence in the multiple regressions. The few times it does have a low p-value (and thus statistical significance) are the same instances when the 5yr's p-value is high. This trend is consistent with the negative relationship between the two predictor's coefficients, which we first discovered in the pairs plot.
+
+Finally, let's touch briefly on the issue of multicollinearity:
+
+```{r yr30lackinfluence, include=TRUE}
+vif.test<-rollapply(AssignmentDataRegressionComparison,width=Window.width,by=Window.shift,by.column=FALSE,
+                        FUN=function(z) vif(lm(Output1~USGG3M+USGG5YR+USGG30YR,data=as.data.frame(z))))
+rownames(vif.test)<-rolling.dates[,10]
+
+vif.test[sample(rownames(Pvalues)[Pvalues[,4]>.5],5),]
+```
+
+The table above shows the VIF for each variable in linear models from 5 random periods where the p-value for the 30yr was greater than 0.5. While not always the case, the 5yr and 30yr tend to have high variable inflation scores. This indicates strong multicollinearity in each model, as the inputs to the multiple regression are highly correlated with each other. In this case, we likely don't need both the 5yr and the 30yr as inputs.
+
+<div style="font-size:28px;color:blue;"> <b>Step 7</b></div>
+
+#### Perform PCA with the inputs (columns 1-7).
+
+First, let's prepare the data and explore the dimensionality of 3 variables: The 3m, 2yr, and 5yr.
+```{r pcadataprep, include=TRUE}
+AssignmentData.Output<-AssignmentData$Output1
+AssignmentData<-data.matrix(AssignmentData[,1:7],rownames.force="automatic")
+AssignmentData.3M_2Y_5Y<-AssignmentData[,c(1,3,5)]
+pairs(AssignmentData.3M_2Y_5Y)
+```
+
+#### Analyze the covariance matrix of the data. Compare results of manual calculation and cov().
+
+```{r manualcovmatrix, include=TRUE}
+Centered.Data<-apply(AssignmentData,2,function(x) x-mean(x))
+(Manual.Covariance.Matrix<-(t(Centered.Data) %*% Centered.Data)/(nrow(Centered.Data)-1))
+(Covariance.Matrix <- cov(AssignmentData))
+```
+
+#### Plot the covariance matrix.
+
+```{r covarianceplot, include=TRUE}
+Maturities<-c(.25,.5,2,3,5,10,30)
+contour(Maturities,Maturities,Covariance.Matrix)
+```
+
+Before continuing, it's important to understand 2 things:
+
+<div><em><b> 1) What is the Covariance Matrix, and What's in it? </em></b></div>
+<ul>
+  <li>The covariance matrix captures the spread and orientation of our dataset in n-dimensions (in our case, 7).</li>
+  <li>Its main diagonal contains the variance in each dimension.</li>
+  <li>Its off-diagonal holds the relationship or covariance between variables in our data.</li>
+  <li>Because $cov(x,y) = cov(y,x)$, the resulting covariance matrix is <b>square and symmetric.</b></li>
+</ul>
+
+<div><em><b> 2) What does the Covariance Matrix Tell Us and Why does it Matter? </em></b></div>
+
+We tend to think of variables {${X_1,X_2,...,X_N}$} as a set existing in N-dimensional space because we have $N$ inputs. But some of these variables may be correlated with each other, and the true variance of our input space can be explained using fewer dimensions. To examine this redundancy, we can look at the covariance matrix $A$ of our inputs and find which directions contain the most variance and how much variance those directions explain. 
+
+In an extreme example where our inputs are uncorrelated and independent, then the off-diagonal of our covariance matrix $A$ will contain all zeros. In this case, the largest value on the main diagonal scales the unit vector of the dimension where variance is the largest. More likely than not, however, our inputs are correlated, so $A$ is not diagonal. In this case, it's not immediately clear which direction explains the most variance in our data. Luckily, $A$ has some interesting properties that help us out.
+
+$A$ can have eignvalue(s) and eigenvector(s) because $A$ is square. And because $A$ is also symmetric, any different eigenvectors in $A$ will be orthogonal. As a result, if $A$ transforms random vector $v$, the transformation $Av$ points closer toward the direction in which the variance is largest unless $v$ is an eigenvector itself, in which case $Av$ is a scalar multiple of original vector $v$. The eigenvectors of $A$ represent a new set of vectors that are orthogonal to each other and thus uncorrelated with each other. The eigenvectors uncover the direction of greatest variance in each dimension of our dataset, while their associated eigenvalues represent the actual variance along each corresponding eigenvector. 
+
+To isolate these eigenvectors (and eigenvalues), we factor our covariance matrix. We can then use this factored matrix to transform our original inputs into uncorrelated vectors. PCA is the technique we'll explore to perform this factorization and input transformation.
+<br><br>
+
+#### Perform PCA by manually calculating factors, loadings and analyzing the importance of factors.
+
+First, let's perform PCA manually. Here are the steps:
+<ul>
+  <li>Get the eigenvectors and eigenvalues from our covariance matrix.</li>
+  <li>Get the intercept values L0, which is the mean of each column in our dataset.</li>
+  <li>Isolate the Loadings, which are the orthonormal eigenvectors (confirmed in code below).</li>
+  <li>Isolate the Factors, which are the principal compoents (linear combinations of original inputs and Loadings).</li>
+</ul>
+
+```{r manualeigendecomp, include=TRUE}
+Eigen.Decomposition <- eigen(Manual.Covariance.Matrix)
+
+# L0 is the mean of each column in our original data set
+L0 <- apply(AssignmentData,2,mean)
+
+# Loadings are the coefficients of our principal components, which are equal to orthonormal eigenvectors
+Loadings <- Eigen.Decomposition$vectors
+
+# Show that the loadings are orthormal eigenvectors -- transpose and dot product should return identity
+round(t(Loadings) %*% Loadings,5)
+
+# Note that using Centered.Data here essentially takes care of L0 intercept in calculation
+Factors <- Centered.Data %*% Loadings
+colnames(Loadings) <- c("Loadings 1","Loadings 2","Loadings 3","Loadings 4","Loadings 5","Loadings 6","Loadings 7")
+rownames(Loadings) <- colnames(AssignmentData)
+colnames(Factors) <- c("PC1","PC2","PC3","PC4","PC5","PC6","PC7")
+Loadings[,1:3]
+head(Factors[,1:3],5)
+
+# Show that the Factors are uncorrelated versions their original X variables
+round(cor(Factors),5)
+```
+
+#### Plot the Importance of the Factors:
+
+```{r maunaleigenfactorplot}
+barplot(Eigen.Decomposition$values/sum(Eigen.Decomposition$values),width=2,col = "black",
+        names.arg=c("F1","F2","F3","F4","F5","F6","F7"))
+```
+
+#### Plot the First Three Loadings:
+
+```{r importantloadings, include=TRUE}
+matplot(Maturities,Loadings[,1:3],type="l",lty=1,col=c("black","red","green"),lwd=3)
+```
+
+#### Interpret the factors by looking at the shapes of the loadings.
+
+A quick note about the Loadings themselves:
+<ul>
+  <li> Loadings are coefficients of principal components (or factors) and equal to eigenvectors of our covariance matrix.</li> 
+  <li> Loadings help us transform our original inputs into a new set of orthogonal and thus uncorrelated vectors (the factors). </li>
+</ul>
+
+Using the loadings alone, we can make some observations about the factors themselves:
+
+<div><em><b>Loading 1 and Factor 1</b></em></div>
+In the plot above, the roughly horizontal black line represents the loadings for Factor 1. Note that the loadings are approximately equal and their line never crosses zero. Because Treasury YTMs often move in the same direction, this means that Factor 1 captures quasi-parallel shifts of the UST yield curve. Given that the yield curve's most dominant trend is a downward shift over time, it makes sense that the most important factor accounts for its shifts.
+
+<div><em><b>Loading 2 and Factor 2</b></em></div>
+While the most dominant trend is a yield curve shift, each UST along the yield curve does not move at the same rate. In some periods, the short-end of the curve increaes/decreases faster than the long-end of the curve (and vice versa), causing the curve to flatten/steepen as it shifts upward or downward. Factor 2 complements factor 1, explaining the changes in the shape of the yield curve as it shifts. The red line in the loadings plot demonstrates this behavior. The coefficients have a larger magnitude for the <2yr and >10yr, while the 3-7 range loadings are not very impactful. Economically, this makes sense, as flattening/steepening depends on the spread between longer-dated USTs and shorter-dated USTs. Therefore, Factor 2 captures the second most dominant change in the curve -- its average slope.
+
+<div><em><b>Loading 3 and Factor 3</b></em></div>
+YTM movement in the belly of the curve defines the Yield Curve's curvature. If there were no curvature at all, the Yield Curve's slope would be constant along the curve. But when curvature exists, the Yield curve's slope changes along the curve, even though its position and general steepness / flatness are already defined. Factor 3 captures how curvature changes when the yield curve shifts and tilts. This movement corresponds to the green line on the plot. The gleen line crosses zero twice before increasing at a diminishing rate. This shows that Factor 3 changes the yield curve's curvature, influencing rates along the curve very differently before mellowing out for later maturities. 
+
+#### Calculate and plot 3 selected factors
+
+```{r firstfactorplot, include=TRUE}
+matplot(Factors[,1:3],type="l",col=c("black","red","green"),lty=1,lwd=3)
+```
+
+#### Change the signs of the first factor and the corresponding factor loading.
+
+```{r secondfactorplots, include=TRUE}
+Loadings[,1]<--Loadings[,1]
+Factors[,1]<--Factors[,1]
+matplot(Factors[,1:3],type="l",col=c("black","red","green"),lty=1,lwd=3)
+matplot(Maturities,Loadings[,1:3],type="l",lty=1,col=c("black","red","green"),lwd=3)
+```
+
+```{r factorplot, include=TRUE}
+plot(Factors[,1],Factors[,2],type="l",lwd=2)
+```
+
+#### Draw at least three conclusions from the plot of the first two factors above.
+
+<div><b><em>Conclusion 1: Spread and Influence</b></em></div>
+The graph above demonstrates that Factor 1 has a much larger range and standard deviation than Factor 2. As a result, Factor 1's influence captures more of the variance in the true yield curve's movement over time. The yield curve has shifted dramatically downward, and Factor 1 demonstrates that behavior given its large movement form right-to-left on the X-axis. Factor 2's range and standard deviation are much smaller. This makes sense, as Factor 2 adjusts the yield curve's shape. While Factor 2 can cause the yield curve to move, it does not capture or measure the yield curve's shifts. Rather, it measures the flattening or steepening of the yield curve. Those measurements are seen as adjustments to an otherwise normal yield curve that is defined more frequently by its quasi-parallel movements than its changes in shape.
+
+<div><b><em>Conclusion 2: Relationships between Factors Leading Up to Major Market Events</b></em></div>
+ 
+The first chart below plots Factor 1 against Factor 2, with market behavior ~1999-02 in light green / dark green and ~2006-08 in pink / red. In both time frames, the factors demonstrate a strong negative relationship, confirmed by the correlation table. This relationship strengthens as a market bubble builds leading up to an eventual market crash. The presence of this negative correlation is important, because it breaks away from the general independence between the two factors (which are orthogonal when considering the entire dataset).
+
+From this plot, we can also examine if one Factor's movement causes another Factor's movement. In ~1999-02, for example, the yield curve begins shifting upward before it begins to flatten. The light green line captures this pattern. Eventually, as an economic bubble is about to burst, the market begins to correct, and the yield curve shifts downward then steepens dramatically. The dark-green line follows this general pattern.
+
+While this pattern is not the case in every market boom and crash, its presence in this time frame brings to light the effect each factor might have as a leading or lagging indictor.
+
+
+```{r factorplot2conclusion1, include=TRUE}
+plot(Factors[,1],Factors[,2],type="l",lwd=2)
+
+# show the rates movement in ~1998 to ~2002
+lines(Factors[4450:4850,1],Factors[4450:4850,2],col="light green")
+lines(Factors[4851:5450,1],Factors[4851:5450,2],col="forest green")
+
+# show the rates movement in ~2004 to ~2007
+lines(Factors[6200:6600,1],Factors[6200:6600,2],col="pink")
+lines(Factors[6601:7000,1],Factors[6601:7000,2],col="red")
+
+# show the correlation changes in these plots
+cor.plots <- cbind(cor(Factors[,1],Factors[,2]),
+                   cor(Factors[4450:5450,1],Factors[4450:5450,2]),
+                   cor(Factors[6200:7000,1],Factors[6200:7000,2]))
+
+colnames(cor.plots) <- c("Overall","~2001 crash", "~2008 crash")
+cor.plots
+```
+
+Lastly, the line plots below demonstrate the effect of major market events. Normally, Factor 1 captures most of the yield curve's movements. When the yield curve's shape changes dramatically, however, Factor 1 does not predict the yield curve changes as well. In the two time frames above, Factor 2 is necessary to account for the unexplained variance in yield curve moves that Factor 1 cannot account for.
+
+```{r codefor2proof, echo=FALSE}
+OldCurve0<-AssignmentData[4450,]
+NewCurve0<-AssignmentData[5450,]
+CurveChange0<-NewCurve0-OldCurve0
+FactorsChange0<-Factors[4450,]-Factors[5450,]
+ModelCurveAdjustment.1Factor0<-OldCurve0-t(Loadings[,1])*FactorsChange0[1]
+ModelCurveAdjustment.2Factors0<-OldCurve0-t(Loadings[,1])*FactorsChange0[1]-t(Loadings[,2])*FactorsChange0[2]
+matplot(Maturities,
+        t(rbind(OldCurve0,NewCurve0,ModelCurveAdjustment.1Factor0,ModelCurveAdjustment.2Factors0)),
+        type="l",lty=c(1,1,2,2,2),col=c("black","red","green","blue"),lwd=3,ylab="Curve Adjustment",main="2000 Crash")
+legend(x="topright",c("Old Curve","New Curve","1-Factor Adj.","2-Factor Adj."),
+       lty=c(1,1,2,2),lwd=3,col=c("black","red","green","blue"))
+
+
+OldCurve1<-AssignmentData[6200,]
+NewCurve1<-AssignmentData[7000,]
+CurveChange1<-NewCurve1-OldCurve1
+FactorsChange1<-Factors[6200,]-Factors[7000,]
+ModelCurveAdjustment.1Factor1<-OldCurve1-t(Loadings[,1])*FactorsChange1[1]
+ModelCurveAdjustment.2Factors1<-OldCurve1-t(Loadings[,1])*FactorsChange1[1]-t(Loadings[,2])*FactorsChange1[2]
+matplot(Maturities,
+        t(rbind(OldCurve1,NewCurve1,ModelCurveAdjustment.1Factor1,ModelCurveAdjustment.2Factors1)),
+        type="l",lty=c(1,1,2,2,2),col=c("black","red","green","blue"),lwd=3,ylab="Curve Adjustment",main="2008 Crash")
+legend(x="topright",c("Old Curve","New Curve","1-Factor Adj.","2-Factor Adj."),
+       lty=c(1,1,2,2),lwd=3,col=c("black","red","green","blue"))
+
+```
+
+<div><b><em>Conclusion 3: Volatile vs. Normal Markets</b></em></div>
+
+The plot below visualizes the difference between calm (if you can call them that) and volatile markets. Both the red and the blue line represent ~4-5 year periods, yet the red line's changes are minor relative to those of the blue. This observation represents large differences in the yield curve's volatility during these time frames. During 1981-1985 (blue line), the yield curve shifted dramatically, inverted, and normalized multiple times. As a result, the UST yield curve was all over the place, and the Factor plot below evidences this volatility. From ~2009-2014, on the other hand, the yield curve has been fairly stable. It's remained normal the entire time, and its main movements include minor flattening and steepening periods. The factor plot demonstrates this relative calmness as well. The red line has almost no variance on the x-axis, and its variance along the y-axis is much smaller than that of the blue line. 
+
+```{r factorplot2conclusion, include=TRUE}
+plot(Factors[,1],Factors[,2],type="l",lwd=2)
+
+# show the rates movement in ~1981 to ~1985 -- high volatility
+lines(Factors[1:1000,1],Factors[1:1000,2],col="blue")
+
+# show the rates movement in ~1990 to ~1995
+lines(Factors[7300:8300,1],Factors[7300:8300,2],col="red")
+```
+
+#### Analyze the adjustments that each factor makes to the term curve.
+
+```{r oldcurvenewcurve, include=TRUE}
+OldCurve<-AssignmentData[135,]
+NewCurve<-AssignmentData[136,]
+CurveChange<-NewCurve-OldCurve
+FactorsChange<-Factors[136,]-Factors[135,]
+ModelCurveAdjustment.1Factor<-OldCurve+t(Loadings[,1])*FactorsChange[1]
+ModelCurveAdjustment.2Factors<-OldCurve+t(Loadings[,1])*FactorsChange[1]+t(Loadings[,2])*FactorsChange[2]
+ModelCurveAdjustment.3Factors<-OldCurve+t(Loadings[,1])*FactorsChange[1]+t(Loadings[,2])*FactorsChange[2]+
+  t(Loadings[,3])*FactorsChange[3]
+```
+```{r oldcurvenewcurveplot, include=TRUE}
+matplot(Maturities,
+        t(rbind(OldCurve,NewCurve,ModelCurveAdjustment.1Factor,ModelCurveAdjustment.2Factors,
+                ModelCurveAdjustment.3Factors)),
+        type="l",lty=c(1,1,2,2,2),col=c("black","red","green","blue","magenta"),lwd=3,ylab="Curve Adjustment")
+legend(x="topright",c("Old Curve","New Curve","1-Factor Adj.","2-Factor Adj.",
+                      "3-Factor Adj."),lty=c(1,1,2,2,2),lwd=3,col=c("black","red","green","blue","magenta"))
+
+rbind(CurveChange,ModelCurveAdjustment.3Factors-OldCurve)
+```
+
+#### Explain how shapes of loadings affect adjustments using only factor 1, factors 1 and 2, and all 3 factors.
+
+Let's start with some context:
+<ul>
+  <li>The black line above is the UST yield curve on a given day.</li>
+  <li>The red line is the UST Yield curve the following day.</li>
+  <li>Over the course of the day, each YTM along the UST Yield curve changed at different rates.</li>
+</ul>
+
+The first three factors help us model <b> how each Treasury's YTM change contributed to the overall yield curve shift.</b> Factor 1 explains most of the day-over-day movement in the yield curve. The dotted-green line in the plot above represents the quasi-parallel upward shift of the UST curve. That being said, the yield curve also steepened (because in this case it's inverted), so Factor 1 line underestimates the upward shift on the short end of the curve and overstates the upward shift on the long end of the curve. Factor 2 captures some of the unexplained variance left over from Factor 1.
+
+Factor 2, the dotted blue line, makes adjustments to the Factor 1 curve to bring us closer to the true day-over-day shift in the UST yield curve. While it's clear the yield curve shifted updward, the UST yields did not move proportionally across the curve. In this case, the short end of the curve (<2yr) YTM's shifted more than they would if the shift were parallel, while the long end of the curve (>10 year) moved less than expected. Because Factor 2 accounds for the steepness/flatness of the curve, it accounts for the unexplained variance left over from Factor 1. It re-adjusts the short end of the curve upward and moves the long end of the curve downward.
+
+Factor 3, the dotted pink line, makes some final touches to account for unexplained variance left after from Factors 1 and 2. The yield curve not only shifted upward and steepened (inversely), it also changed its curvature slightly. Factor 3 accounts for this movement, edging the longer end of the curve slightly upward in comparison to Factor 2.
+
+All three of these Factors' movements represent the Loading lines from the Loading vs. Maturity Plot. The best example is Loading 2 and Factor 2. Loading 2 tells us that the short end of the yield curve and the long end of the yield curve will adjust more than the belly will. As a result, Factor 2 adjusts the yield curve by pushing up the front end of the curve and pushing down the long end of the curve. The line plot for Loading 2 shows those weights in action because they correspond to how Factor 2 moves in the adjustment plot. 
+
+#### See the goodness of fit for the example of 10Y yield.
+
+```{r closeness10year,inlcude=TRUE}
+cbind(Maturities,Loadings[,1:3])
+Model.10Y<-L0[6]+Loadings[6,1]*Factors[,1]+Loadings[6,2]*Factors[,2]+Loadings[6,3]*Factors[,3]
+matplot(cbind(AssignmentData[,6],Model.10Y),type="l",lty=1,lwd=c(3,1),col=c("black","red"),ylab="5Y Yield")
+```
+
+
+#### Repeat the PCA using princomp
+
+```{r repeatwithprimcomp, include=TRUE}
+PCA.Yields<-princomp(AssignmentData)
+names(PCA.Yields)
+# Check that the loadings are the same
+cbind(PCA.Yields$loadings[,1:3],Maturities,Eigen.Decomposition$vectors[,1:3])
+matplot(Maturities,PCA.Yields$loadings[,1:3],type="l",col=c("black","red","green"),lty=1,lwd=3)
+matplot(PCA.Yields$scores[,1:3],type="l",col=c("black","red","green"),lwd=3,lty=1)
+# Change the signs of the 1st factor and the first loading
+PCA.Yields$loadings[,1]<--PCA.Yields$loadings[,1]
+PCA.Yields$scores[,1]<--PCA.Yields$scores[,1]
+matplot(Maturities,PCA.Yields$loadings[,1:3],type="l",col=c("black","red","green"),lty=1,lwd=3)
+matplot(PCA.Yields$scores[,1:3],type="l",col=c("black","red","green"),lwd=3,lty=1)
+```
+
+#### Uncover the Mystery of Output 8
+
+```{r outputplotanddescription, include=TRUE}
+matplot(cbind(PCA.Yields$scores[,1],AssignmentData.Output,Factors[,1]),type="l",col=c("black","red","green"),lwd=c(3,2,1),lty=c(1,2,3),ylab="Factor 1")
+```
+
+<b> The Output variable in our dataset is principal compenent 1, or factor 1.</b> Factor 1 itself is a linear combination of each UST YTM weighted by its respective loading. This corresponds to the daily dot product between the UST YTM's centered values and the eigenvector which explains the most variance in our input data, as shown below:
+
+```{r proofofoutputvar, include=TRUE}
+cbind(head(Centered.Data,5) %*% Loadings[,1],head(AssignmentData.Output,5))
+```
+
+Therefore, the Output variable is the weighted average of all 7 Treasury maturities where the weights of each UST correspond to the first vector of loadings. It's important to note that the Output does not explain the full variance in yield curve movement but rather the maximum amount of variance when using one input only. Each additional principal component would explain the maximum amount of remaining variance not captured by more important principal components. Using Output1 (or Factor 1) only, however, we capture a significant portion of the variance in the UST Yield curve because Output 1 ultimately measures how the yield curve shifts, which is its most profound behavior over time. 
+
+#### Compare the regression coefficients from Step 2 and Step 3 with factor loadings.
+
+First, look at the slopes for AssignmentData.Input~AssignmentData.Output
+
+```{r compareto2and3, include=TRUE}
+t(apply(AssignmentData, 2, function(AssignmentData.col) lm(AssignmentData.col~AssignmentData.Output)$coef))
+cbind(PCA.Yields$center,PCA.Yields$loadings[,1])
+```
+
+This shows that the zero loading equals the vector of intercepts of models Y~Output1, where Y is one of the columns of yields in the data. Also, the slopes of the same models are equal to the first loading.
+
+```{r compare2and3again, include=TRUE}
+AssignmentData.Centered<-t(apply(AssignmentData,1,function(AssignmentData.row) AssignmentData.row-PCA.Yields$center))
+dim(AssignmentData.Centered)
+t(apply(AssignmentData.Centered, 2, function(AssignmentData.col) lm(AssignmentData.Output~AssignmentData.col)$coef))
+```
+
+To recover the loading of the first factor by doing regression, use all inputs together.
+
+This means that the factor is a portfolio of all input variables with weights.
+
+```{r finalsteps}
+t(lm(AssignmentData.Output~AssignmentData.Centered)$coef)[-1]
+PCA.Yields$loadings[,1]
+```
