@@ -3,6 +3,7 @@ title: 'Course Project: Statistical Analysis'
 author: "Joseph Kearney"
 date: "3/20/2018"
 output:
+  github_document: default
   word_document: default
   pdf_document: default
   html_document: default
@@ -11,7 +12,6 @@ output:
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 rm(list=ls())
-setwd("/Users/josephkearney/Desktop/U_Chicago/Classes/Statistical_Analysis/Class_Project")
 library(lubridate)
 library(scales)
 library(reshape2)
