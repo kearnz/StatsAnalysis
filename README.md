@@ -1,4 +1,4 @@
-# Stats Analysis
-An analysis of UST YTMs for U Chicago MS Program.
+# Some ~Simple~ Analytics
+Random snippets from my Masters program at the University of Chicago
 
-Github Page: https://kearnz.github.io/stats-analysis/
+Statistical Analysis of US Treasury Yield Curve: https://kearnz.github.io/uoc-analysis/ust
