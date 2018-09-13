@@ -1,0 +1,630 @@
+---
+title: 'Course Project: Part 1'
+author: "Joseph Kearney"
+date: "8/25/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(lattice)
+library(latticeExtra)
+library(AER)
+library(MASS)
+library(pscl)
+library(fitdistrplus)
+setwd("/Users/josephkearney/Stuff/U_Chicago/Classes/Linear_Non_Linear/Final_Project")
+```
+
+<div style="color:navy;font-size:24px;"><b>1. <u>Problem Description and Goal of Assignment</u></b></div>
+<br>
+
+> The business analytics group of a company is asked to investigate causes of malfunctions in technological process of one of the manufacturing plants that result in significant increase of cost for the end product of the business.
+One of suspected reasons for malfunctions is deviation of temperature during the technological process from optimal levels. The sample in the provided file contains times of malfunctions in seconds since the start of measurement and minute records of temperature.
+
+Increases in production costs affect a company's bottom line. Production costs can increase because of factors a company cannot control, such as a spike in  prices for a product's inputs. But in this case, the company suspects cost increase comes from inefficiencies in its production process. Such inefficiencies increase variable costs and erode a company's margins if not handled in a timely manner.
+
+It's our job to understand the company's production process and investigate what's causing cost increases. 
+
+<div style="color:navy;font-size:24px;"><b>2. <u>The Data</u></b></div>
+<br>
+
+Let's load the data into a dataframe and explore what we are working with. 
+
+```{r part2data, include=TRUE}
+# Load the CSV data
+Course.Project.Data<-read.csv("Final_Project.csv")
+head(Course.Project.Data, 10)
+
+summary.stats <- function(d){
+  # create a local copy for summary stats
+  d.t <- d
+  # total number of events and number of unique temperatures
+  d.t$Changes <- c(1, ifelse(diff(d.t$Temperature)!=0,1,0))
+  num.temp.changes <- sum(d.t$Changes)
+  num.events <- length(d.t$Time)
+  unique.temps <- length(unique(d.t$Temperature))
+  # number of events relative to changes in temperature
+  num.events.vs.temps <- num.events / num.temp.changes
+  # time elapsed
+  time.elapsed <- tail(d.t,1)$Time - head(d.t, 1)$Time
+  time.elapsed.min <- time.elapsed / 60
+  time.elapsed.hr <- time.elapsed / 3600
+  min.time.temp.chg <- mean(diff(d.t[which(d.t$Changes==1),]$Time))
+  # collect and name sum stats
+  sum.stats <- c(num.events,num.temp.changes,unique.temps,
+                 num.events.vs.temps,time.elapsed.hr,time.elapsed.min,
+                 time.elapsed / num.events,min.time.temp.chg)
+  sum.stats.names <- c("number of malfunctions", "number of temp changes",
+                        "unique temp changes", "malfunction temp ratio",
+                        "time elapsed (hr)", "time elapsed (min)",
+                        "avg time elapsed b/w malfunction",
+                        "avg elapsed time b/w temp chg")
+  #return results as dataframe
+  return(data.frame(list(stat.name=sum.stats.names,
+                         stat=round(sum.stats,3))))
+}
+
+summary.stats(Course.Project.Data)
+```
+
+The dataset captures the time of each malfunction and the temperature when the malfunction occurred. The first 10 records indicate that malfunctions can occur at any time, but temperature seems fixed per minute. Any $n$ number of malfunctions within 60 seconds have the same temperature. The results from the "summary stats" function confirm this behavior. Malfuncions occur, on average, once every 5 seconds, while temperature changes once every ~60 seconds.
+
+The summary stats function provides additional color. It shows the number of malfunctions in the dataset and the time range in which they occur. The company suspects that temperature deviations and malfunctions are linked. From the results above, we do not yet know the problem, but it seems plausible that the temperature change time lag may be a factor.
+
+<div style="color:navy;font-size:24px;"><b>3. <u>Create Counting Process, Explore Cumulative Intensity</u></b></div>
+<br>
+
+To investigate further, let's visualize the relationship between time and the cumulative number of malfunctions.
+
+```{r step3, include = TRUE}
+Cum.Count <- cbind(Time=Course.Project.Data$Time,Count=1:length(Course.Project.Data$Time))
+Counting.Process<-as.data.frame(Cum.Count)
+head(Counting.Process)
+plot(Counting.Process$Time,Counting.Process$Count,type="s")
+```
+
+<b>What does it tell you about the character of malfunctions and the reasons causing them?</b>
+
+The line plot shows a steady, constant growth in the number of malfunctions over time. In smaller intervals, malfunctions tend to wander along the hypothetical straight line that represents the trend's slope. Some periods see spikes in the number of malfunctions, while others extend with no malfunctions at all. But overall, malfunctions occur approximately once every 5 seconds and grow linearly with time.
+
+This behavior suggests the malfunctions follow a poisson proess. A poisson process is a set of random variables capturing the evolution of a system over time. If our process is poisson, malfunctions occur independently and do not increase or decrease the likelihood of another. Additionally, the mean intensity of malfunctions is constant. It may vary in small intervals but always reverts back to its mean rate.
+
+Of particular interest are the time between malfunctions and the malfunction count per unit of time. If we find statistical distributions for each, we understand the process generating malfunctions. We can predict when malfunctions will arrive and how often they will occur in fixed intervals.
+
+This plot above simply visualizes the growth in malfunctions over time, so we cannot make any conclusions about the nature of malfunctions yet. We must fit distributions to our process, analyze their diagnostics, and compare the likelihood that each produced the data we observe.
+
+<div style="font-size:18px;"><b><em>3.1: Explore cumulative intensity of the process. </em></b></div>
+<br>
+
+> Cumulative intensity is calculated as $\Lambda(t)=\frac{N_t}{t}$, where $N_t$ is the number of events during the time interval $[0,t]$.
+For our data $t$ is the sequence of time stamps and $N_t$ is the count up until $t$.
+
+In this case, cumulative intensity demonstrates how frequently the malfunctions occur. A constant rate suggests a linear relationship and independence between malfunctions. An increasing rate indicates a time-dependent relationship, and one in which malfunctions may increase the chance of future malfunctions.
+
+```{r step3.1, include = TRUE}
+# cumulative intensity calculation
+Cum.Intensity <- Counting.Process$Count/Counting.Process$Time
+
+# plots using the Cum.Intensity Variable
+plot(Counting.Process$Time,Cum.Intensity,type="l",ylab="Cumulative Intensity")
+abline(h=Cum.Intensity[length(Cum.Intensity)], col = "blue")
+abline(h=mean(Cum.Intensity), col = "red")
+
+# FOR REFERENCE - example of the FIRST intensity
+abline(h=Cum.Intensity[1], col = "grey")
+```
+
+The plot above displays the cumulative intensity as a function of time. This line appears in black. I've added three additional lines: 
+
+1) In red, the mean of the cumulative intensity. 
+2) In blue, the last cumulative intensity mark.
+3) In grey, the first cumulative intensity mark.
+
+They horizontal grey line shows the cumulative intensity set by the first malfunction. This malfunction came in at roughly 5%, meaning the first malfunction happened 20 seconds into the process. As expected, cumulative intensity varies wildly in the beginning of the process. The smaller the sample, the greater effect each malfunction has on the cumulative intensity. Eventually, the cumulative intensity converges at a stable rate. Convergence occurs between the last cumulative intensity value and the mean of the cumulative intensity over the entire process. The blue and red lines represent these values, respectively. The actual values are shown below:
+
+```{r step3.1data, include = TRUE}
+c(First.Intensity=Cum.Intensity[1],
+  Last.Intensity=Cum.Intensity[length(Cum.Intensity)],
+  Mean.Intensity=mean(Cum.Intensity))
+```
+
+It's important to note that <b> convergence suggests stability but may not be ideal depending on the rate</b>. Unless the rate at which malfunctions occur converges below a permissible rate, the company's costs remain above desired levels. We do not have information about an acceptable rate, but ~0.2 (the convergence rate) seems pretty high. This rate means a malfunction occurs once every 5 seconds.
+
+For now, we'll return to the process itself and reason about the its distribution.
+
+<div style="color:navy;font-size:24px;"><b>4. <u>Check for Over-Disperson</u></b></div>
+<br>
+
+Let's look at the first 30 rows. We use 30 rows to provide context for the highlighted note in the assignment, which appears below this table.
+
+```{r step4, include = TRUE}
+head(Course.Project.Data,30)
+```
+
+> Note that the first 7 rows (events) occurred during the first minute. The temperature measurement for the first minute was 91.59307°F. The following 10 rows happen during the second minute and the second minute temperature is 97.3086°F. The third minute had 7 events at temperature 95.98865°F. The fourth minute had 4 events at 100.3844°F. And the following fifth minute had only 1 event at 99.9833°F.
+
+Because temperature changes once every minute on average, we calculate one-minute malfunction counts as well. First, we must check to see if there are malfunctions every minute. Minutes without a malfunction cannot be ignored - we need to record those minutes with a count of 0 and a temperature of NULL or NA.
+
+```{r step4.1.min.df, include = TRUE}
+get.missing <- function(d){
+  # create a local copy
+  d.t <- d
+  # find the minute representation of each, and the diff in minutes
+  d.t$Minute.Rep <- floor(d.t$Time/60) + 1
+  d.t$Minute.Diff <- c(0,diff(d.t$Minute.Rep))
+  # get the examples where a minute is skipped (diff = 2)
+  mm.ind <- which(d.t$Minute.Diff==2)
+  mm.v <- c(mm.ind - 1, mm.ind)
+  mm.e <- d.t[mm.v,]
+  # show those examples and return the dataframe
+  mm.e <- mm.e[order(mm.e$Minute.Rep),]
+  missing.minutes <- d.t[mm.ind,"Minute.Rep"] - 1
+  # return missing list and df example
+  return(list(
+    missing.minutes.example = mm.e,
+    missing.minutes = missing.minutes
+    ))
+}
+
+(missing.min <- get.missing(Course.Project.Data))
+```
+
+The "get.missing" function returns the minutes for which there are no malfunctions. Additionally, the function prints a dataframe to the console to demonstrate what a "missing" minute looks like. The first minute with no malfunctions arrives at 107, or 1 hour and 47 minutes into the process. The next minute with no malfunctions appears 60 minutes later. We must inject rows into our "one-minute count" dataframe, as a minute with no malfunctions should not be discarded; instead, its count should be zero. 
+
+```{r step4.1.min.df.cnt, include = TRUE}
+one.minute.count <- function(d,m){
+  # great grouped object with appropriate columns
+  minute.mid <- function(i) (i * 60) - 30
+  df.group <- d %>%
+    mutate(
+      Minute.Rep = floor(Time/60) + 1,
+      Minute.times = minute.mid(Minute.Rep)
+      ) %>%
+    dplyr::group_by(Minute.times) %>%
+    dplyr::summarise(Minute.counts = n(),
+              Minute.Temps = first(Temperature))
+  # add in the missing rows
+  missing.df<-data.frame(
+    list(Minute.times = minute.mid(m$missing.minutes),
+         Minute.counts = rep(0,length(m$missing.minutes)),
+         Minute.Temps = rep(NA,length(m$missing.minutes))
+         )
+    )
+  # return the result as a dataframe
+  res.df <- as.data.frame(rbind(df.group,missing.df)) %>% arrange(Minute.times)
+  return(res.df)
+}
+
+One.Minute.Counts.Temps <- one.minute.count(Course.Project.Data, missing.min)
+head(One.Minute.Counts.Temps,10)
+```
+
+The "one.minute.count" function returns a dataframe with the number of malfunctions per minute and the temperature recorded for each malfunction during that minute. The "Minute.times" column represents the mid point in seconds for each minute. 
+
+The plot below charts the number of counts in one minute (y-axis) against the midpoint of each minute.
+
+```{r step4.1.plot, include = TRUE}
+plot(One.Minute.Counts.Temps$Minute.times,One.Minute.Counts.Temps$Minute.counts)
+```
+
+<div style="font-size:18px;"><b><em>4.1: Methods for Overdispersion </em></b></div>
+<br>
+
+In this section, we test our dataset for overdispersion. Overdispersion arises when the observed data is more dispersed than a given model permits. This problem generally arises because the model assumes a distribution for which a functional relationship between the mean and the variance exist, and that relationship limits the model's ability to capture the true variance in the response. 
+
+As an example, a Poisson distribution's mean is equal to its variance. Overdispersion would result if a model assumes a Poisson-distributed response but the observed data's variability is larger than its mean. Overdispersion in models generates misleading results, underestimated error rates, and leads to unsafe conclusions. Therefore, it's important that we detect overdisperson from the onset and avoid distributions that lead to overdispersion in our models.
+
+Diagnosing overdispersion is not straightforward. Multiple methods exist, so we will explore some to detect overdispersion in our data.
+
+<div style="font-size:16px;"><b><u>4.1.1: A Quick and Rough Method </u></b></div>
+<br>
+
+> Look at the output of glm() and compare the residual deviance with the number of degrees of freedom. If the assumed model is correct deviance is asymptotically distributed as Chi-squared $X^2$ with degrees of freedom $n-k$ where $n$ is the number of observations and $k$ is the number of parameters. For Chi-squared distribution the mean is the number of degrees of freedom $n-k$.
+If the residual deviance returned by glm() is greater than $n-k$ then it might be a sign of over-dispersion.
+
+Test the method on simulated Poisson data.
+
+```{r part4simtest, include = TRUE}
+Test.Deviance.Overdispersion.Poisson<-function(Sample.Size,Parameter.Lambda){
+  my.Sample<-rpois(Sample.Size,Parameter.Lambda)
+  Model<-glm(my.Sample~1,family=poisson)
+  Dev<-Model$deviance
+  Deg.Fred<-Model$df.residual
+  (((Dev/Deg.Fred-1)/sqrt(2/Deg.Fred)>-1.96)&((Dev/Deg.Fred-1)/sqrt(2/Deg.Fred)<=1.96))*1
+} 
+Test.Deviance.Overdispersion.Poisson(100,1)
+```
+
+> The function simulates a sample from Poisson distribution, estimates parameter $\lambda$ which is simultaneously the mean value and the variance, then it checks if $\frac{Deviance}{Deg.Freedom} - 1$ belongs to the interval $(-1.96,1.96]$. If yes, the result is 1. Otherwise it is 0.
+
+Now repeat the call of the function 300 times to see how many times it returns one and how many times zero.
+
+The estimate of the parameter $\lambda$ given by glm() is $e^{Coefficient}$:
+
+```{r part4simtestestimation, include = TRUE}
+set.seed(19)
+# replicate and get value
+sum(replicate(300,Test.Deviance.Overdispersion.Poisson(100,1)))
+# get the coefficient
+exp(glm(rpois(1000,1)~1,family=poisson)$coeff)
+```
+
+The quick and dirty method says 265/300 Possion samples do not have overdispersion. These results suggest that the method detects overdispersion when it does not exist, so we have some false positives. This rate is still very high, and its errors simply make us more cautious. In this case, detecting overdispersion when it does not exist is better than failing to detect overdispersion when it is truly present.
+
+The estimate of the parameter $\lambda$ is 1.005. Because this is a null model, the estimate measures the mean intensity. We created 1000 random variables with true $\lambda$ = 1, so it makes sense that our estimate is close to $\lambda$. We have to exponentiate the coefficients because the model returns them on a log-scale, given that the poisson regression makes a multiplicative relationship linear.
+
+Perform the same test on negative binomial data
+
+```{r part4negbinom, include = TRUE}
+Test.Deviance.Overdispersion.NBinom<-function(Sample.Size,Parameter.prob){
+  my.Sample<-rnbinom(Sample.Size,2,Parameter.prob)
+  Model<-glm(my.Sample~1,family=poisson)
+  Dev<-Model$deviance
+  Deg.Fred<-Model$df.residual
+  (((Dev/Deg.Fred-1)/sqrt(2/Deg.Fred)>-1.96)&((Dev/Deg.Fred-1)/sqrt(2/Deg.Fred)<=1.96))*1
+} 
+sum(replicate(300,Test.Deviance.Overdispersion.NBinom(100,.2)))
+```
+
+We see that the over-dispersed negative binomial distribution sample never passes the test. Therefore, we do not have any false negatives, where there is over dispersion we are unable to detect. This performance is desirable. 
+
+Now apply the test to the one-minute event counts.
+
+```{r part4poismodel, include = TRUE}
+GLM.model<-glm(One.Minute.Counts.Temps$Minute.counts~1,family=poisson)
+summary(GLM.model)
+```
+
+<b>Do you see signs of over-dispersion?</b>
+
+From the regression output above, we see that residual deviance is 1799 and the degrees of freedom is 249. In this case, the model has much higher residual deviance than the degrees of freedom. This discrepancy strongly suggests our model has overdispersion. We can modify the test deviance function written above and apply it to our model:
+
+```{r applystep4.1.1, include = TRUE}
+Test.Deviance.Overdispersion.Counts<-function(Model){
+  Dev<-Model$deviance
+  Deg.Fred<-Model$df.residual
+  (((Dev/Deg.Fred-1)/sqrt(2/Deg.Fred)>-1.96)&((Dev/Deg.Fred-1)/sqrt(2/Deg.Fred)<=1.96))*1
+} 
+
+Test.Deviance.Overdispersion.Counts(GLM.model)
+```
+
+The model fails the "quick and dirty" test. As a result, we conclude there is definitely overdispersion present in the dataset. We continue to explore overdispersion with two more robust tests.
+
+<div style="font-size:16px;"><b><u>4.1.2: Regression test by Cameron-Trivedi </u></b></div>
+<br>
+
+The test implemented in AER is described in Cameron, A.C. and Trivedi, P.K. (1990). Regression-based Tests for Overdispersion in the Poisson Model. Journal of Econometrics, 46, 347–364.
+
+> In a Poisson model, the mean is $E(Y)=\lambda$ and the variance is $V(Y)=\lambda$ as well.
+They are equal. The test has a null hypothesis $c=0$ where $Var(Y)=\lambda+c∗f(\lambda)$, $c<0$ means under-dispersion and $c>0$ means over-dispersion.
+The function f(.) is some monotonic function (linear (default) or quadratic).
+The test statistic used is a t statistic which is asymptotically standard normal under the null.
+
+Learn how to use dispersiontest() from AER and apply it to GLM.model that we fit earlier:
+
+```{r test.4.1.2, include = TRUE, message = FALSE, warning = FALSE}
+Disp.Test <- dispersiontest(object = GLM.model, alternative = 'two.sided')
+Disp.Test
+```
+
+<b>Does the test show overdispersion?</b>
+
+The dispersiontest tests the null hypothesis of equidispersion in Poisson GLMs against the alternative hypothesis for overdispersion and/or underdispersion. In this case, the p-value is extremely small, so we reject the null hypothesis of equidispersion. Because the dispersion parameter is ~7.37, we conclude that the <b>dispersion is in fact overdispersion</b>. This result is in line with what we found in the first "quick and dirty" method. It provides more evidence for overdispersion.
+
+We'll conclude with one more test.
+
+<div style="font-size:16px;"><b><u>4.1.3: Test against Negative Binomial Distribution </u></b></div>
+<br>
+```{r test.4.1.3, include = TRUE, message = FALSE, warning = FALSE}
+GLM.model.nb <- glm.nb(One.Minute.Counts.Temps$Minute.counts ~ 1)
+summary(GLM.model.nb)
+odTest(GLM.model.nb)
+```
+
+<b>Does the test show overdispersion?</b>
+
+The odTest from the pscl library compares the log-likelihood ratios of a Negative Binomial to the dispersion restriction of a Poisson regression. The null hypothesis of the odTest is that the distribution is Poisson as particular case of Negative Binomial against Negative Binomial. The null hypothesis is true when the  parameter $(\theta = 1/a)$ goes to infinity b/c $a$ approaches $0$. The test statistic threshhold at the $0.05$ level is $2.7055$.
+
+In this case, we reject the null hypothesis because our test statistic is $~1044$, which is much greater than $2.7055$. As a result, our p-value is extremely small, and we conclude that the the distribution is NOT Poisson as a particular case of Negative Binomial.
+
+This third method is another way to test for overdispersion in a dataset. It focuses on whether or not we have a Poisson distribution as a special case of the negative binomial, so this method differs from the past two we tried yet yields the same result. Therefore, this test offers even more evidence for overdispersion in the dataset.
+
+<div style="color:navy;font-size:24px;"><b>5. <u>Find the Distribution of Poisson Intensity</u></b></div>
+<br>
+
+In the last section, we found clear evidence of overdispersion. Overdispersion is a sign that a process does not follow a Poisson distribution because the variance is greater than the mean of the data. In this section, we'll explore which distributions can handle overdispersion, and we'll find which distribution best fits the the count and intensity of malfunctions.
+
+<div style="font-size:18px;"><b><em>5.1: Kolmlgorov-Smirnov test </em></b></div>
+<br>
+
+> Kolmogorov-Smirnov test is used to test hypotheses of equivalence between two empirical distributions or equivalence between one empirical distribution and one theoretical distribution.
+
+We'll start with an example from the normal distribution to demonstrate how the KS test works.
+
+```{r kstest, include = TRUE}
+sample1=rnorm(100)
+sample2=rnorm(100,1,2)
+Cum.Distr.Functions <- data.frame(sample1,sample2)
+ecdfplot(~ sample1 + sample2, data=Cum.Distr.Functions, auto.key=list(space='right'))
+```
+
+We create two samples of random variables from a normal distribution but with different means and standard deviation parameters. The plot above demonstrates how the different parameters affect the ECDF of each sample.
+
+Check equivalence of empirical distributions for the two samples.
+
+```{r kstestequivalence, include = TRUE}
+ks.test(sample1,sample2)
+```
+
+<b>What does this output tell you about equivalence of the two distributions?</b>
+
+The two-sample KS test checks whether two samples are sampled from the same underlying distribution. The null hypothesis is that the samples come from the same distribution, while the alternative hypothesis says they are sampled from different distributions. 
+
+In this case, we reject the null hypothesis that the samples come from the same distribution. At first, this rejection seems odd given the fact that we generate each sample with "rnorm". The two-sample KS test does not make any assumptions about <b> what the distribution is</b>; rather, it checks if the samples are sampled from the same underlying distribution. In this case, KS rejects the null because both samples are both taken from the normal distribution, but not from the same normal distribution.
+
+Check equivalence of empirical distribution of sample1 and theoretical distribution Norm(0,1).
+
+```{r sammple1check, include=TRUE}
+ks.test(sample1,"pnorm",mean=0,sd=1)
+```
+
+<b>What does this output tell you?</b>
+
+The one-sample KS test works a bit differently. It tests whether a sample follows a theoretical distribution. Here, we test sample1 against the theoretical standard normal distribution. As expected, the ks-test fails to reject the null hypothesis. We cannot say that our sample does not come from the standard normal. This makes sense, given that we created a sample with the same parameters as the standard normal.
+
+Check equivalence of the empirical distribution of sample2 and theoretical distribution Norm(0,1).
+
+```{r sample2check, include=TRUE}
+ks.test(sample2,"pnorm",mean=0,sd=1)
+```
+
+<b>What does this output tell you?</b>
+
+Sample2 comes from a normal with a mean = 1 and sd = 2. While still normal, sample2 is not from the standard normal, which is what we are testing it against in this one-sample test. Therefore, we reject the null hypothesis and conclude sample2 is not from the standard normal.
+
+The findings from the one-sample tests are consistent with the test comparing sample1 to sample2. Together, these resuls demonstrate the KS test's flexibility. It can test distributions against each other and also test one distribution against a theoretical.
+
+<div style="font-size:18px;"><b><em>5.2: Check the distribution for the entire period. </em></b></div>
+<br>
+
+> Apply Kolmogorov-Smirnov test to Counting.Process$Time and theoretical exponential distribution with parameter equal to average intensity. The empirical distribution should be estimated for time intervals between malfunctions.
+
+We can apply the KS test to our dataset as well. In our scenario, we want to model the intensity of malfunctions. This information is contained within the distribution of the expected time between each malfunction. We'll start with the exponential disribution, which often measures the time between events in a poisson process:
+
+```{r kstestexp, include = TRUE}
+
+# function that takes dataset and distribution to test
+ks.counting.time.test <- function(d, ecdf.f){
+  intervals <- diff(d$Time)
+  mean.intensity <- mean(d$Count/d$Time)
+  return(ks.test(intervals, ecdf.f, mean.intensity))
+}
+
+# results from the test
+(KS.Test.Event.Intervals <- ks.counting.time.test(Counting.Process, "pexp"))
+
+# Here's how the test should look like
+c(KS.Test.Event.Intervals$statistic,p.value=KS.Test.Event.Intervals$p.value)
+
+```
+
+From the test results, we reject the null hypothesis and conclude that the time between malfunctions is not exponentially distributed with a mean intensity given by our estimate. The results from the test are expected because of what we already know about the overdispersion in the dataset and the relationship between the exponential and Poisson distributions. If data comes from a Poisson distribution, the time between events tends to follow the exponential distribtuion. In Part 4, we cast substantial doubt that the Poisson distribution generates observed malfunction counts per unit of time. As a result, it makes sense that the time between each malfunction is not quite exponentially distributed either.
+
+Plot empirical cumulative distribution function for time intervals between malfunctions.
+
+```{r kstestexpplot, include = TRUE}
+plot(ecdf(diff(Counting.Process$Time)),main="ECDF", xlab="Time Interval", ylab="CDF")
+```
+
+<div style="font-size:18px;"><b><em>5.3. Check distribution of one-minute periods </em></b></div>
+<br>
+
+> Use 5 different candidates for distribution of Poisson intensity of malfunctions. Find one-minute intensities Event.Intensities. One-minute intensity by definition is the number of events per unit of time (second).
+
+We doubt the Poisson distribution generates counts per unit of time and seek alternatives to the exponential distribution to explain time between malfunctions. We'll try 5 distribution candidates to pinpoint what describes the observed data the best and why.
+
+First, let's look at the histogram of malfunction intensities, where the unit of time is a second.
+
+```{r histogramp5, include=TRUE}
+# histogram wrapper to make its data output invisible
+ihist <- function(dist,...) invisible(hist(dist,...))
+
+# calculate event intensities and their mean.
+Event.Intensities <- One.Minute.Counts.Temps$Minute.counts/60
+(mean.intensity <- mean(Event.Intensities))
+(Event.Hist <- ihist(Event.Intensities))
+```
+
+The mean malfunction intensity $\lambda = 0.2036$, or about 1 malfunction every 5 seconds. 
+
+<b>What distribution does this histogram remind you of?</b>
+
+The histogram above plots the frequency of each one-minute intensity rate per unite of time (second). The histogram is reminiscint of the exponential distribution, but its decay is not really "exponential". There appears to be substantial positive skew, with quite a few high intensity periods. As a result, the right tail is far more dense than what we'd expect with a truly exponential distribution. This type of slowly decaying process is <b> more characteristic of a gamma distribution with shape parameter between 1 and 2</b>. When the gamma distribution's shape paramater = 1, the distribution is the same as the exponential. When it equals 2, the first histogram bin is small, followed by a sharp increase and lingering delay as values increase along the X-axis. This histogram seems to fit somewhere in between. 
+
+The histogram's departure from the exponential distribution is easier to visualize with an example. The first two graphs below are histograms of the counts per minute from our observed dataset and the counts per minute expected from a set of random variables with an exponential distribution that takes an intensity parameter equal to that of our sample. The last histogram overlays the previous two on the same plot. In red is the counts per minute. In purple is what we would have expected <b>if the malfunction count data was poisson distributed</b> with $\lambda = 0.2036$.
+
+```{r histocheck, include = TRUE}
+set.seed(5)
+# Get the same number of random exponential varaibles with intensity = rate
+Theoretical.Exp <- rexp(length(Event.Intensities), mean.intensity)
+# create a comparable histogram
+Theoretical.Hist <- ihist(Theoretical.Exp, breaks = 4) 
+One.Min.Hist <- ihist(One.Minute.Counts.Temps$Minute.counts)
+# plot both histograms together
+plot(Theoretical.Hist, col=rgb(0,0,1,1/4), xlim = c(0,50))
+plot(One.Min.Hist, col=rgb(1,0,0,1/4), xlim = c(0,50), add = T)
+```
+
+The final histogram helps visualize how the skew and shape of the counts do not come from a Poisson distribution. The difference in shape applies to exponential vs. gamma w/ shape > 1 as well. The mean of the Poission distribution for counts and the mean of exponential distribution for time between counts (which are inversely proportional) may be accurate representations of the dataset, but these distributions do not capture the way the data varies. The histograms demonstrate that intense periods (or shorter windows between events) occur more often than expected. 
+
+This visualization is in line with the results we've collected from tests in previous sections, but we cannot make conclusions about the correct distributions from plots alone. In the upcoming sections, we'll perform quantiative tests to determine the proper distribution and subsequently asess whether or not the gamma hypothesis is true.
+
+> Suggest 5 candidates for the distribution. Fit each of you 5 candidate distributions to Event.Intensities using fitdistr() from MASS. Start with fitting normal and exponential distributions first.
+
+We are already aware that the normal distribution and exponential distribution are not the correct fits. That being said, we'll include their fit (or lack  thereof) as a reference point. Using these distributions gives us a chance to introduce the "fitdistr" method, which we will use to find the optimal distribution for our observed dataset.
+
+```{r fittingnormalexp5, include = TRUE}
+# Normal fit
+(Fitting.Normal <- fitdistr(Event.Intensities, "normal"))
+plotdist(Event.Intensities,"norm",para=list(mean=Fitting.Normal$estimate[1],sd=Fitting.Normal$estimate[2]))
+# Exponential fit
+(Fitting.Exponential <- fitdistr(Event.Intensities, "exponential"))
+plotdist(Event.Intensities,"exp",para=list(rate=Fitting.Exponential$estimate[1]))
+```
+
+```{r fittingks, include = TRUE, warning = FALSE}
+# Normal KS
+KS.Normal <- ks.test(Event.Intensities, "pnorm", 
+                     Fitting.Normal$estimate[1], Fitting.Normal$estimate[2])
+c(KS.Normal$statistic,P.Value=KS.Normal$p.value)
+
+# Exponential KS
+KS.Exp <- ks.test(Event.Intensities, "pexp", 
+                  Fitting.Exponential$estimate[1], Fitting.Exponential$estimate[2])
+
+c(KS.Exp$statistic,P.Value=KS.Exp$p.value)
+
+```
+
+<b>What do you conclude from these tests?</b>
+
+The fitdistr method provides estimates for parameters given a dataset and theoretical distribution. The plotdist method visualizes what the fitdistr method has essentially done. From the plotdist histogram and qqplot, we see right away that the normal distribution is not a good fit. The exponential distribution improves upon the fit, but the affect of the positive skew is revealed. The KS tests provide quantitative support. In both cases, the KS test rejects the null hypothesis that the "Event.Intensities" sample is normally / exponentially distributed. From the combination of qualitative and quantitative testing, we can safely assume we need to fit additional distributions.
+
+> Try to fit gamma distribution directly using fitdistr():
+
+```{r tryfitgamma, include = TRUE}
+# GENERATES AN ERROR, SO RMARKDOWN WON'T KNIT TO HTML
+# (Fitting.Gamma <- fitdistr(Event.Intensities, "gamma"))
+```
+
+<b>What results do you obtain when you fit gamma distribution using fitdistr()?</b>
+
+The gamma distribution works with positive, non-zero values only. Therefore, the fitdistr method thows an error when we pass a sample that includes zeros. The one-minute malfunctions count data has 7 minutes for which the count is zero, so the intensity per time unit for these minutes is also zero. This is an invalid sample for the fitdistr method if we specify the gamma distribution, and as a result, fitdistr throws an error.
+
+```{r tryfitgammanozero, include = TRUE, warning = FALSE, message = FALSE}
+(Fitting.Gamma.No.Zero <- fitdistr(Event.Intensities[-which(Event.Intensities==0)], "gamma"))
+```
+
+The "Fit.Gamma.No.Zero" variable demonstrates that the fitdistr function works when we do not have zero intensity. While we do not use these results, the code above shows how we can make the fitdistr function work with gamma.
+
+> Estimate parameters of gamma distribution using method of moments.
+
+The gamma distribution takes two parameters:
+<ul>
+<li style="font-size:14px;padding-bottom:3px">$\alpha$ (alpha) - the shape of the distribution</li>
+<li style="font-size:14px;padding-bottom:3px">$\beta$ (beta) - the rate of the distribution (which is the inverse of scale, as discussed below)</li>
+</ul>
+
+Gamma relies on both parameters to calculate mean and variance. Assuming random variable $X \sim Gamma(\alpha, \beta)$:
+
+<ul>
+<li style="font-size:14px;padding-bottom:3px">$E[X] = \alpha\beta$</li>
+<li style="font-size:14px;padding-bottom:3px">$V[X] = \alpha\beta^2$</li>
+</ul>
+
+We also know that $\lambda = \frac{1}{\beta}$, so we can estimate rate and shape of gamma in terms of its moments (steps straightforward and excluded for brevity).
+
+<ul>
+<li style="font-size:14px;padding-bottom:3px">$\alpha = \frac{E[X]^2}{V[X]}$</li>
+<li style="font-size:14px;padding-bottom:3px">$\lambda = \frac{E[X]}{V[X]}$</li>
+</ul>
+
+```{r estimategamma, include = TRUE}
+var.intensity <- var(Event.Intensities)*(length(Event.Intensities)-1)/length(Event.Intensities)
+(Moments.Rate <- mean.intensity/var.intensity)
+(Moments.Shape <- mean.intensity^2/var.intensity)
+```
+
+The rate and shape parameters are estimated from the sample mean and variance under a gamma distribution. They look promising without any tests. From the histogram, we postulated a gamma distribution with $1 < \alpha < 2$. The estimate returned here is $\alpha = 1.655739$. 
+
+Next, we'll assess how well the gamma distribution with our estimates fits our malfunction dataset.
+
+> Check gamma with these parameters as a theoretical distribution using Kolmogorov-Smirnov test.
+
+We have the expected rate for our sampled gamma distribution, and the shape is in line with our initial expectations from the histogram plot. We use one-sample KS to test the sampled distribution against the theoretical gamma with rate and shape parameters equal to our estimates.
+
+```{r checkgammaks, include = TRUE, warning = FALSE}
+plotdist(Event.Intensities,"gamma",para=list(shape=Moments.Shape,rate=Moments.Rate))
+c(Moments.Shape, Moments.Rate)
+(KS.Moments <- ks.test(Event.Intensities, "pgamma", Moments.Shape, Moments.Rate))
+```
+
+The results from the gamma distribution are the best we've seen yet. Fitdistr shows how well the gamma distribution fits. In the top left plot, the theoretical density crosses through the midpoint of almost every histogram bin, and the density correctly accounts for the positive skew in the Event.Intensity data. The Q-Q plot is also a huge improvement from the exponential. This improvement stems from the gamma's freely changing shape parameter, $\alpha$. When $\alpha = 1$, the gamma distribution takes the form of the exponential distribution. When $a>1$, the gamma distribution converges more and more to a normal shape with fatter tails. Our gamma fit has $\alpha = 1.655739$, which seems to fit extremely well. 
+
+Lastly, the empirical CDF plot is the best fit we've seen yet. The KS test supports this observation more rigorously. The KS test for the one-sample gamma fails to reject the null hypothesis. There is not enough support to conclude that the distribution is not gamma. 
+
+> Find at least 2 more candidates and test them by Kolmogorov-Smirnov.
+
+The gamma distribution provided great results, but there are similar distributions to gamma that we still need to try. 
+
+<b><em>The Log Normal Distribution</b></em>
+
+We start with the lognormal distribution. The lognormal explains a random variable whose logarithm is normally distributed. The distribution is very similar to the gamma distribution, and the lognormal often models time lengths as well, especially related to human behavior. Its main difference from gamma: the log of a lognormal random variable is normally distributed, while the log of a gamma random variable is left skewed. 
+
+The lognormal distribution is continuous but takes positive values only, so we run into the same issue fitting the lognormal that we did with gamma. Because we cannot use the fitdist method, we must estimate the parameters for mean and standard deviation on our own. We do so in the code below, using the Event Intensities data and estimating the log-mean and log-sd:
+
+```{r lognormalfit, include = TRUE}
+# LOG NORMAL EXAMPLE
+eim <- mean(Event.Intensities)
+eiv <- var(Event.Intensities)
+LogNormal.Mu <- log((eim^2)/sqrt(eiv+eim^2))
+LogNormal.sigma <- sqrt(log(eiv/(eim^2)+1))
+plotdist(Event.Intensities, "lnorm",para=list(meanlog=LogNormal.Mu,sdlog=LogNormal.sigma))
+(KS.Candidate.4 <- ks.test(Event.Intensities, "plnorm", LogNormal.Mu, LogNormal.sigma))
+```
+
+The lognormal results are subpar. The fit is better than that of the normal and exponential, but there are clear deficiencies in comparsion to gamma. The log normal has the general shape and skew we want, but its peak density is too high, and its right tail drops off too quickly. Additionally, it does not pass the KS-test. The D-statistic and associated p-value lead us to reject the null hypothesis and conclude that the lognormal is not the right distribution for our data.
+
+<b><em>The Quasi-Poisson Distribution</b></em>
+
+We've continuously explored the poission distribution and noted it cannot handle overdispersion. Therefore, we know the poisson distribution will not fit better than gamma. But the GLM method allows us to fit a family called "quasi-poisson" which relaxes the assumption of mean = variance. So in theory, the quasi poisson sounds like a reasonable choice.
+
+Unfortunately, the quasi-Poisson model is not a likelihood model but a quasi-likelihood model. Therefore, we have to find a workaround to fit its "distribution". With quasi-Poission, we still specify mean and variance but leave likelihood unspecified. Therefore, there is no density function with predicted probabilities for each count in quasi-poisson.
+
+We will work around this issue by fitting glm(y ~ 1), which essentially computes the mean of a process plus a dispersion parameter based on the residual sum of squares:
+
+```{r quasipoisson, include = TRUE}
+Quasi.Glm <- summary(glm(One.Minute.Counts.Temps$Minute.counts ~ 1, family=quasipoisson))
+Quasi.Rate <- Quasi.Glm$dispersion
+Quasi.Shape <- Moments.Shape
+plotdist(Event.Intensities,"gamma", para=list(shape=Quasi.Shape,rate=Quasi.Rate))
+(KS.Candidate.5 <- ks.test(Event.Intensities, "pgamma", Quasi.Shape, Quasi.Rate))
+```
+
+Essentially, this strategy fine-tunes the parameters and fits a different gamma. The rationale is that the quasi-poisson dispersion parameter may serve as a better rate than what we derived for gamma originally. First, we model a null glm with quasi poission in an attempt to get the dispersion parameter from the counts. We save the dispersion parameter as the rate. Because we are still testing against the Gamma distribution (since we know poisson will not work), we reuse the same mean from before, but we pass a different rate.
+
+The results are quite interesting. Visually, the fit looks like it does a better job. The KS test also technically fails to reject the null hypothesis, but the p-value is right on the border. Therefore, we are far less confident in this fit for our data even if the distribution looks visually appealing.
+
+We have a gamma that works already, and we are very confident about the result. So there's no real reason to use a more complicated strategy to back into another version of gamma unless it's a substantially better fit. Therefore, we'll stick with the gamma we have.
+
+> Collect all estimated distributions together and make your choice.
+
+In the code below, we collect the results of the 5 distributions we fit. We bind together their one-sample KS test statistic ($D$) and associated p-values so that we can compare the results from each.
+
+```{r collectallresults, include = TRUE}
+round(rbind(KS.Moments=c(KS.Moments$statistic,P.Value=KS.Moments$p.value),
+      KS.Candidate.4=c(KS.Candidate.4$statistic,P.Value=KS.Candidate.4$p.value),
+      KS.Candidate.5=c(KS.Candidate.5$statistic,P.Value=KS.Candidate.5$p.value),
+      KS.Exp=c(KS.Exp$statistic,P.Value=KS.Exp$p.value),
+      KS.Normal=c(KS.Normal$statistic,KS.Normal$p.value)),7)
+```
+
+<b>What distribution for the one-minute intensity of malfunctions do you choose?</b>
+
+The gamma distribution is the best representation of the one-minute intensity for malfunctions. When looking at the entire dataset as a whole, we notice substantial overdispersion present. This overdispersion means the variability of the counts is more than the poisson distribution can capture. As a result, the exponential distribution will underestimate the likelihood of high-intensity minutes. This underestimation stems from the exponentials relationship with the Poisson distribution. Exponential is not able to handle non-constant time intervals, as it assumes that the rate $\lambda$ is constant.
+
+The gamma distribution distribution's rate and shape have the highest likelihood of producing the one-minute intensities from the dataset. Therefore, gamma is the best distribution we were able to fit to the data. It has the least significant KS Test statistic, and it is the only distribution in which we are confident as a good approximation. It handles the overdispersion well, and it is the model we select for one-minute intensities.
+
+<b>What distribution of one-minute malfunctions counts follow from your choice?</b>
+
+The negative binomial distribution is the best representation of the one-minute malfunction counts. The poisson distribution assumes that the mean and variance of the observed data are equal. In this assignment, we have tirelessly tested this assumption, and we have proven that it does not hold for our dataset. We need a distribution that can handle overdispersion for counts, and that distirbution is the negative binomial. The Poisson distribution is a special, restricted case of the negative binomial - one in which no overdispersion exists. Therefore, our poisson process, which has overdispersion, is best approximated by the negative binomial.
+
+Write One.Minute.Counts.Temps to file OneMinuteCountsTemps.csv to continue working on Part 2.
+
+```{r finalcsv, include = TRUE}
+write.csv(One.Minute.Counts.Temps,file="OneMinuteCountsTemps.csv",row.names=FALSE)
+```

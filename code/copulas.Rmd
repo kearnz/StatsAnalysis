@@ -1,0 +1,274 @@
+---
+title: 'Course Project: Part 2'
+author: "Joseph Kearney"
+date: "8/25/2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(lattice)
+library(latticeExtra)
+library(AER)
+library(MASS)
+library(pscl)
+library(fitdistrplus)
+library(copula)
+setwd("/Users/josephkearney/Stuff/U_Chicago/Classes/Linear_Non_Linear/Final_Project")
+```
+
+<div style="color:navy;font-size:24px;"><b><u>Problem Description and Goal of Assignment</u></b></div>
+<br>
+
+In Part 1, we investigate which probability distribution explains both the time between malfunctions and the per-minute malfunction count. The results help the company understand how frequently malfunctions occur and predict when they may arrive in the future. That being said, the distributions do not explain why malfunctions occur in the first place, or what may cause them.
+
+<b>In this part, we explore the relationship between malfunctions and the temperature at which they occur.</b>
+
+> Explore possible types of dependence between one-minute counts and temperature.
+
+First, let's prepare the data. In the code below, we:
+<ul>
+  <li>Load the one-minute counts from Part 1</li>
+  <li>Filter out minutes with no counts</li>
+  <li>Add a column to the counts that measures intensities</li>
+  <li>Visualize the relationship between intensities and temperature</li>
+</ul>
+
+```{r part2data, include=TRUE}
+# ---------------------- 2.2.1 ---------------------- #
+Part2.Data<-read.csv("OneMinuteCountsTemps.csv", header = T)
+head(Part2.Data)
+dim(Part2.Data)
+
+# ---------------------- 2.2.2 ---------------------- #
+complete.cases <- with(Part2.Data, which(Minute.counts > 0))
+Part2.Data<-Part2.Data[complete.cases(Part2.Data),]
+dim(Part2.Data)
+
+Part2.Data<-as.data.frame(cbind(Part2.Data,Part2.Data[,2]/60))
+colnames(Part2.Data)<-c("Times","Counts","Temperatures","Intensities")
+
+# ---------------------- 2.2.3 ---------------------- #
+plot(Part2.Data$Temperatures,Part2.Data$Intensities)
+```
+
+The scatterplot above shows the relationship between the one-minute malfunction intensity rates and their respective temperature over the course of the minute. There is certainly a <em>positive</em> relationship between intensity and temperature, but we must be careful how we define that relationship. Intensity's lower theoretical bound is zero, and in this case, it's greater than zero because we have removed all minutes where intensity = 0. <b>This constraint yields a nonlinear relationship between the raw values of intensities and temperature</b>. In general, the malfunction rate hovers between 0 and 0.2 when temperatures are anywhere below 100. But when temperature breaks the 100-degree threshold, the intensity starts increasing with temperature in a roughly linear manner.
+
+To further demonstrate this positive but nonlinear relationship, let's model a simple OLS:
+
+```{r olsmodel, include = TRUE}
+par(mfrow=c(2,3))
+lm.intemp <- lm(Intensities~Temperatures, data = Part2.Data)
+plot(lm.intemp)
+plot(density(resid(lm.intemp)))
+```
+
+All of these plots reveal that a non-consant rate of change between temperature and intensity. The nonlinearity is not symmetric; it arises from very high temperature values only. The fat right-tail in the density plot and the one-sided skew in the QQ plot visualize this nonsymmetry the best.
+
+> Analyze empirical copula.
+
+We have established a nonlinear trend between intensities and temperature, but they also have a clear positive relationship. Let's plot the ranks of both Temperature and Intensities:
+
+```{r plotempcopula, include = TRUE}
+# ---------------------- 2.2.5 ---------------------- #
+plot(rank(Part2.Data$Temperatures),rank(Part2.Data$Intensities))
+```
+
+<b>What type of dependency you see in the empirical copula?</b>
+
+Note that a rank of 1 corresponds to the lowest Temperature / Intensity. High temperatures and intensities, on the other hand, have a "low" rank in the 200's to 250's. Also, Temperature and Intensity now have the same range, upper bound, and lower bound given that each data point must take on a value between 1 and 250.
+
+These new constraints change the relationship between Temperature and Intensity. First, transforming each variable to a bounded scale and range removes the effect of the each original variable's shape and distribution. As a result, the positive trend between the two variables is considerably less pronounced in the plot, but so is the nonlinearity.
+
+The fat-tail from the first plot stems from the postitive relationship between Temperature and Intensity once Temperature crosses the 100-degree threshhold. In the rank plot, this relationship forms in the upper-right-hand corner of the plot. The ranks for temperature and intensity cluster together, and the ranks for each variable follow eachother because the underyling data is positively correlated in this area. In the empirical copula plot, this top-right clustering is known as <b> upper tail dependence </b>.
+
+> What is the distribution of temperatures?
+
+In the code below, we look at the distribution of temperature. We then fit the distribution and test its fit against its theoretical. To do so, we use the familiar "fitdistr" and "ks.test" methods.
+
+```{r distoftemp, include = TRUE}
+hist(Part2.Data$Temperatures)
+
+# ---------------------- 2.2.6 ---------------------- #
+(Fitting.Temp.Normal <- fitdistr(Part2.Data$Temperatures, "normal"))
+plotdist(Part2.Data$Temperatures,"norm",
+         para=list(mean=Fitting.Temp.Normal$estimate[1],
+                   sd=Fitting.Temp.Normal$estimate[2]))
+
+# ---------------------- 2.2.7 ---------------------- #
+(KS.Temp <- ks.test(Part2.Data$Temperatures,"pnorm", 
+                    mean = Fitting.Temp.Normal$estimate[1], 
+                    sd = Fitting.Temp.Normal$estimate[2]))
+```
+
+The histogram plot visualizes the distribution of the Temperatures. Overall, the distribution appears to be normal. There's some positive skew, but the sample size is also quite small (250 one-minute periods). The fitdistr and plotdistr functions make us more comfortable in Temperature's normality. The plots show that the normal distribution fits very well using Temperature's mean and standard deviation estimates. Lastly, the KS-test rejects the null hypothesis. There is no strong evidence that the distribution is not normal.
+
+<div style="color:navy;font-size:24px;"><b><u>Fit a Copula</u></b></div>
+<br>
+
+We now explore the dependency between Temperature and Intensity. Because the relationhship is nonlinear, we cannot rely on traditional correlation metrics. Instead, we utlilze copulas to model the dependence bewteen each random variable.
+
+```{r fitcopula228, include = TRUE}
+# ---------------------- 2.2.8 ---------------------- #
+copula.cols <- Part2.Data[,3:4]
+
+gumbel.cop<-gumbelCopula(param=5,dim=2)
+
+Copula.Fit<-fitCopula(gumbel.cop, 
+          pobs(copula.cols,ties.method = "average"), 
+          method = "ml",
+          optim.method = "BFGS", 
+          optim.control = list(maxit=1000))
+
+summary(Copula.Fit)
+```
+
+We fit the data to a Gumbel copula. The Gumbel copula handles upper-tail dependence well. In our case, upper-tail dependence results from positive relationship between temperature and intensity after temperature hits the 100-degree threshhold.
+
+Next, we simulate a copula using the estimates from the Gumbel copula fit.
+
+```{r simulCopula, include = TRUE}
+par(mfrow=c(2,2))
+simulate.copula <- function(est.cop, est.num, cop.type = gumbelCopula, sed = 8301735){
+  set.seed(sed)  
+  sc <- cop.type(param=est.cop@estimate,dim=2)
+  persp(sc, dCopula, main="pdf",xlab="u", ylab="v", zlab="c(u,v)")
+  contour(sc, dCopula, main="pdf",xlab="u", ylab="v")
+  scc <- rCopula(est.num, sc)
+  sim.n <- length(scc[,1])
+  plot(scc,main="Simulated Copula",xlab="Variable 1",ylab="Variable 2")
+  plot(apply(scc,2,rank)/sim.n,main="Empirical Copula",xlab="Variable 1",ylab="Variable 2")
+  title("Copula.Fit",outer=TRUE,line=-2)
+  return(scc)
+}
+
+# ---------------------- 2.2.9 ---------------------- #
+sim.250 <- simulate.copula(Copula.Fit, 250)
+```
+
+We simulate a copula with 250 random variables using our initial Copula Fit estimates. The simulated and empirical copula appear above. In the top right corner, we observe the pdf of the simulation. The larger circles in the upper right of that plot correspond to the upper-tail dependence we have noticed throughout the last few steps.
+
+Next, we simulate 5000 random variables using the dependency structure from our Copula above. Then, we use the quantile function to convert the copula samples into simulated temperatures and intensities. To do so, we specify the normal distribution for temperature and the gamma distribution for intensities. In part 1, we select the gamma distribution as the best model for intensity, and in this assignment, we find that the normal distribution best approximate temperature.
+
+```{r simulCopula5000, include = TRUE}
+# ---------------------- 2.2.10 ---------------------- #
+set.seed(8301735)
+sc <- gumbelCopula(param=Copula.Fit@estimate,dim=2)
+sim.copula <- rCopula(5000, sc)
+
+# gamma distributed with shape and rate using estimates from part 1 intensities
+Simulated.Intensities <- qgamma(sim.copula[,1],1.655739,8.132313)
+
+# normally distributed with mean and variance using estimates from temps
+Simulated.Temperature <- qnorm(sim.copula[,2],Fitting.Temp.Normal$estimate[1],Fitting.Temp.Normal$estimate[2])
+
+# ---------------------- 2.2.11 ---------------------- #
+plot(Simulated.Temperature,Simulated.Intensities)
+
+```
+
+When we use the copula to simulate temperature and intensities, we preseve the dependence between the two that we initially observed. We then simulate thousands of additional random variables to make the relationship more apparent at scale. The plot above captures this relationship. Again, we see the pick-up in intensities once temperatures cross the ~100 threshhold.
+
+Next, we plot the empirical copula:
+
+```{r simcopulaexp, include = TRUE}
+# ---------------------- 2.2.12 ---------------------- #
+plot(rank(Simulated.Temperature),rank(Simulated.Intensities))
+
+```
+
+The empirical copula plot of the simulated temperature-intensity pairs reveals the tail dependence we noted from the observed data. 
+
+The Gumbel Copula helps us understand the dependency between temperature and intensities. We note that there is a clear relationship between the two, although that relationship is nonlinear. Intensity's rate of change is not constant as temperature increases. We observe a linear positive relationship between the two variables when temperature crosses a specific threshhold.
+
+We now reason which regression we can use to explain how intensity changes in response to temperature changes. Because we know the dataset contains overdispersion, we start with the negative binomial model:
+
+```{r nbfitexample, include = TRUE}
+# ---------------------- 2.2.13 ---------------------- #
+NB.Fit.To.Sample <- glm.nb(Intensities*60~Temperatures, data = Part2.Data)
+NB.Fit.To.Sample$coefficients
+NB.Fit.To.Sample$deviance
+NB.Fit.To.Sample$df.residual
+NB.Fit.To.Sample$aic
+```
+
+In the code above, we compute the Negative Binomial fit for our observed dataset. We show the coefficient for Temperature, the model's deviance vs. degrees of freedom, and the model's AIC. We will comment on the goodness-of-fit for this model shortly.
+
+Next, we create the simulated sample for tail events. In this case, we define tail events as those with temperature over 110 and intensity rate over 0.5. These pairs represent the strongest upper-tail dependency in our copula plots. We apply these constraints to our dataset and plot the result:
+
+```{r tailsexample, include = TRUE}
+Simulated.Tails<-as.data.frame(
+  cbind(round(Simulated.Intensities[(Simulated.Temperature>110)&(Simulated.Intensities>.5)]*60),
+        Simulated.Temperature[(Simulated.Temperature>110)&(Simulated.Intensities>.5)]))
+colnames(Simulated.Tails)<-c("Counts","Temperatures")
+
+# ---------------------- 2.2.14 ---------------------- #
+plot(Simulated.Tails$Temperatures,Simulated.Tails$Counts)
+```
+
+We plot the simulated temperature and counts within the upper-right tail. The main purpose of simulation is to generate additional points that have the same dependency structure as our original data. Our original data did not have enough observations in the upper tail (and only had 250 observations total). Our simulated data, however, gives us a large enough sample to understand the relationship between temperature and malfunction count in the upper tail. 
+
+> Fit negative binomial model to the tail observations Simulated.Tails.
+
+Now that we've isolated the tail data, we regress Temperatures on Counts again. We observe any differences between the tails from our simulated data and the initial fit we created on the observed data:
+
+```{r nbfittails, include = TRUE}
+# ---------------------- 2.2.15 ---------------------- #
+Simulated.Tails.NB <- glm.nb(Counts~Temperatures, data = Simulated.Tails)
+
+# ---------------------- 2.2.16 ---------------------- #
+summary(NB.Fit.To.Sample)
+summary(Simulated.Tails.NB)
+```
+
+To analyze the goodness-of-fit for each regression, let's quickly review the purpose of the negative binomial in relation to poisson. In poisson, $\lambda = \mu = \sigma^2$ (i.e. the intensity of a poisson process is its mean and variance). This equality means data from poisson distribution has variance proportional to the mean. In reality, however, this relationship does not always occur. Generally, the variance in a dataset exceeds the mean, and overdispersion occurs. This overdispersion is an important part of the data's variability, so a poisson model underestimates variance if overdispersion exists. To model overdispersion, the negative binomial distribution redefines the relationship between the mean and the variance of a process. In negative binomial: $$\mu = \mu;\sigma^2 = \mu + \frac{\mu}{\theta}$$ In essence, the negative binomial allows variance to be larger than the mean. Significant overdispersion exists when $\theta$ is small. When $\theta$ is large, the negative binomial converges to the poisson distribtuion.
+
+So far, we've fit two negative binomial regressions. The first uses every observation in our original dataset. The second uses simulated data in the upper tail, where the relationship between temperature and intensity becomes more defined. In the first case, the residual deviance is a bit larger than the degrees of freedom, and the AIC is about double. The coefficients are about the same. The first model handles data that has far more variability, and thus the model is not as performant. That being said, use of the negative binomial is justied in the first case given the overdispersion, as discussed below:
+
+<b>What do the fitted parameters θ tell you about both models</b>
+
+In the first model, $\theta = 4.203$. This number is quite small, which means that the Negative Binomial overdispersion measure $\frac{\mu}{\theta}$ is significant, and the variance is larger than the mean. In the second model (the upper-tail model), $\theta = 385982$, which is quite large. This parameter essentially wipes out the overdispersion measure. $\sigma^2 = \mu + \frac{\mu}{385982} \rightarrow \mu + 0 = \mu$. Therefore, the second model for the upper tail <b> does not have overdispersion </b>. The negative binomial may not be the best choice in this case. 
+
+<b>Is there an alternative model that you would try to fit to the simulated tail data?</b>
+
+The simulated tail model has a very large value for $\theta$, which means the mean of the distribution essentially equals the variance. This relationship signifies that a poisson model is more appropriate. We can test this hypothesis to confirm a poisson model is a better selection. For completeness, let's test both the full model and the simulated tails model.
+
+```{r odtest, include = TRUE}
+
+odTest(NB.Fit.To.Sample)
+odTest(Simulated.Tails.NB)
+
+```
+
+The odTest hypothesis states that poisson is appropriate as a restricted NB. This means that theta should be very large, which occurs when the poisson disribution is a better approximation of the data. We can think of the poisson model as a restricted version of the Negative Binomial, given that the Negative Binomial is an extension of Poisson and equal to Poisson in special cases (when $\theta$ heads to infinity).
+
+The first odTest for the full dataset rejects the null hypothesis. Overdispersion exists, and therefore the Poisson distribution is not appropriate. In the second odTest, however, the null hypothesis is not rejected. The model is well approximated by a poisson distribution, so we cannot reject the null hypothesis. Therefore, the negative binomial we selected may not be the best model. These tests provide statistical evidence in favor of the poisson distribution to model the simulated tail instead. 
+
+<b>What do both models tell you about the relationships between the temperature and the counts?</b>
+
+The models reveal that the dependency and relationship between temperature and counts is complex and cannot be approximated by one distribution only. If we take the entire process, a negative binomial distribution is the most appropriate, because overdispersion exists. But that overdispersion is a result of random variance between temperature and malfucntion count that may not be interesting to us or to the company. Below 100 degrees, malfunction intensity varies independently of temperature, with little relationship between the two. After 100 degrees, malfunction intensity has a tight, positive relationship with temperature. As the temperature rises, the malfunction count rises as well, and the distribution that models the two is best approximated by Poisson. 
+
+Therefore, our process for counts is a mixture of negative binomial and poisson, while our intensity is a mixture of gamma and exponential. Poission-count and exponential-intensity pick up once temperature crosses a certain threshhold. 
+
+> Fit poisson model to Simulated.Tails$Counts and compare the fit with NB for Part2.Data.
+
+Finally, let's fit the Poisson process to the Simulated tails:
+
+```{r poisfit, include = TRUE}
+# ---------------------- 2.2.20 ---------------------- #
+Poisson.Fit <- glm(Counts~Temperatures, data = Simulated.Tails, family = "poisson")
+summary(Poisson.Fit)
+Poisson.Fit$deviance
+Poisson.Fit$df.residual
+Poisson.Fit$aic
+```
+
+We see that the model fit is quite similar to what the negative binomial returns. The coefficients, residual deviance, and degrees of freedom are all roughly the same. <b> This similarity occurs because the Poisson Distribution is a special case of the Negative Binomial, where dispersion is roughly equal to 1, so the mean and variance are equal</b>.
+
+The main difference between the poisson and negative binomial fits is the way in which each maximum likelihood algorithm computes. The negative binomial distribution must compute an estimate for $\theta$, which in this case is extremely high. That being said, the theta parameter from the negative binomial is not "infinity", so even though the limit for the variance approaches mean, it is not exactly the mean. Therefore, the poisson process produces a lower AIC. The difference is quite small, but it still apparent. Because the AIC uses the log-likelihood in its computation, the a true poisson process (such as the one we have in our tail) is fit best by the Poisson Distribution. 
+
+We conclude that the relationship between temperature and malfunction count comes from a mixture of distributions, depending on the temperature degree. The Negative Binomial fits the process best when we consider the entire dataset. That being said, the portion we care the most about - when malfunction counts per minute are rising - is fit best using the Poisson distribution, and the relationship between temperature and malfunctions is best described by a Possion regression model.
+
+The company now knows the relationship between temperature and malfunction count. Keeping the temperature under the 100-degree threshhold is important. The company should be aware that malfunctions occur regardless of temperature, but they become problematic once temperature rises to certain limits. So long as the company accepts the average rate of malfunctions below 100 degrees, the company should be able to remain efficient. 
