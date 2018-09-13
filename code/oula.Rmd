@@ -1,0 +1,849 @@
+---
+title: "Online University: Predicting Success and Failure Rates in the UK"
+output: html_document
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+<div style="color:navy;font-size:24px;"><b><u>Motivation and Outline of this Project</u></b></div>
+<br>
+
+Online learning has exploded in the past decade as a viable alternative to traditional education methods. The benefits from online education are quite clear for pupils. Online classes cater to a student's schedule rather than that of the university, and most online programs are significantly more affordable than their on-campus alternatives. 
+
+Online programs also benefit the universities that offer them. Presenting a course or entire degree online allows universities to collect new data about students that simply never existed before. Universities can use this data to better understand how students interact with class material and more accuractly measure which students are struggling vs. succeeding. If a university can predict which students may fail or fall behind, the university can better support those at risk. These predictions help universities offer assistance more efficienctly and optimize how they allocate tutoring or support servies.
+
+This project <b>contains the code I wrote to analyze student performance at the Online University (OU) in the UK</b>. Therefore, this page provides explanations of each code section and futher detail where necessary. These sections are meant to make the data exploration and modeling easier to follow. For more information about the presentation that uses this analysis, please get in touch or send me a message!
+
+
+```{r setupstuff, include = FALSE, warning = FALSE, echo = TRUE, results = 'hide', message=FALSE}
+# clear workspace, load libraries, and set working directory
+rm(list=ls())
+library(dplyr)
+library(plyr)
+library(rlang)
+library(gtools)
+library(poLCA)
+library(flexmix)
+library(rpart)
+library(party)
+library(randomForest)
+library(MASS)
+library(rpart.plot)
+library(caret)
+library(ggplot2)
+library(tidyr)
+library(plotROC)
+library(pROC)
+setwd("/Users/josephkearney/Stuff/U_Chicago/Classes/Data_Mining/Final_Project/anonymisedData/")
+```
+
+<div style="color:navy;font-size:24px;"><b><u>Motivation and Outline of this Project</u></b></div>
+<br>
+
+To follow this analyis or explore on your own, you need to download the OU dataset. OU provides the dataset for free on its website here: https://analyse.kmi.open.ac.uk/open_dataset
+
+OU exposes 7 CSV files that function similarly to tables in a relational database schema. Their dataset contains student performance in 7 modules offered over 2 years as well as demographic information about each of the ~30k students who enrolled in the modules. Lastly, the dataset captures interactions between students and the Virtual Learning Environment (VLE) - OU's platform to share class resources, homework assignments, and exams with students.
+
+Let's load the data to see what we're working with:
+
+```{r setupfiles, include = TRUE}
+# look csv files from the directory and extract all the filenames
+csv.files <- list.files(pattern = "*.csv")
+(file.names <- sapply(strsplit(csv.files, ".csv"), "[", 1))
+
+# read all the files into memory, giving them their name as the variable for list access
+file.list <- lapply(as.list(setNames(csv.files, file.names)), read.csv)
+```
+
+In this study, we attempt to predict whether a student will pass or fail a class. The studentInfo file contains the student's final mark in each module: 
+
+```{r encodestudents, include = TRUE}
+# encoding for the student's final marks
+table(file.list$studentInfo$final_result)
+file.list$studentInfo$final_result_encoding <- -1
+file.list$studentInfo[which(file.list$studentInfo$final_result %in% c("Pass","Distinction")),"final_result_encoding"] <- 1
+file.list$studentInfo[which(file.list$studentInfo$final_result == "Fail"),"final_result_encoding"] <- 0
+table(file.list$studentInfo$final_result_encoding)
+```
+
+Before performing analysis, we encode the student's final result in each class as 1, 0, or -1. 1 represents students who receive "Distinction" or "Pass" as final results. 0 is reserved for students who fail, and -1 labels students that withdrew. This encoding prepares the data well for binary classification techniques. In this study, we analyze P/F rates only. Withdrawals deserve an entirely separate analysis which is out of scope for this project.
+
+This code below contains general helper functions used throughout the analysis as well as methods to merge the csv files together. The CSV methods often contain hard-coded column references specific to this analysis ONLY. Regardless, they should give a sense of how the CSV's relate to each other.
+
+```{r helperFuncs, include=TRUE}
+
+# sort by and generate percents for any nested grouping
+gb.func <- function(df, cnt.col, ..., sort.by.col = T, g.func = n_distinct){
+  cnt.col <- sym(cnt.col)
+  cnt.col.name <- paste0("count_", quo_name(cnt.col))
+  cnt.col.perc <- paste0("percent_", quo_name(cnt.col))
+  cnt.sym <- sym(cnt.col.name)
+  df.group <- df %>% 
+    dplyr::group_by_(...) %>%
+    dplyr::summarise(!!cnt.col.name := g.func(!!cnt.col)) %>%
+    dplyr::mutate(!!cnt.col.perc := !!cnt.sym /sum(!!cnt.sym))
+  if (sort.by.col == T){ 
+    return(as.data.frame(df.group %>% dplyr::arrange(desc(!!cnt.sym))))
+  }
+  else{ 
+    return(as.data.frame(df.group))
+  }
+}
+
+# rows to columns based on the key
+r2c.func <- function(df, k, varr) {
+    key.q <- enquo(k)
+    varr.q <- enquo(varr)
+    s <- quos(!!varr.q)
+    df %>% gather(variable, varr, !!!s) %>%
+        unite(temp, !!key.q, variable) %>%
+        spread(temp, varr)
+}
+
+# custom plots used throughout the analysis
+custom.plots <- list(
+  gg.bar = function(d, y.f, x.f, t = NULL){
+    ggplot(data = d, 
+           mapping = aes(x = as.factor(d[,x.f]), y = d[,y.f])) +
+    geom_bar(stat = "identity") +
+    labs(x = x.f, y = "count", title = ifelse(!is.null(t),t,""))
+  },
+  gg.comp.line = function(d, y.f, x.f, f, t = NULL) {
+    ggplot(data = d, 
+           mapping = aes(x = d[,x.f], y = d[,y.f], colour = as.factor(d[,f]))) +       
+     geom_line(aes(group = as.factor(d[,f]))) + 
+      geom_point() + 
+      theme(legend.position="none") +
+    labs(x = x.f, y = "percent %", title = ifelse(!is.null(t),t,""))
+  }
+)
+
+# convert logits to probs
+logit.to.prob <- function(logit){ exp(logit) / (1 + exp(logit))}
+
+# number the course assessments by their order. function to keep it from always updating if rerunning
+map.stud.course <- function(csr = course.assessments.raw, si = student.info){
+  
+  # order correctly then create assigment numbers
+  css <- csr[with(csr, order(code_module, code_presentation, date)),]
+  ca <- as.data.frame(plyr::ddply(css, .(code_module, code_presentation), 
+                                  mutate, assessment_number = seq_along(date)))
+  
+  # generate exam date and the seq along dates and the dates between assignments
+  ca$date <- with(ca, ifelse(is.na(date) & assessment_type=="Exam",module_presentation_length,date))
+  ca$dates_bw_assessment <- with(ca, ave(date, c(code_module, code_presentation), FUN=function(x) c(0, diff(x))))
+  ca$dates_bw_assessment <- with(ca, ifelse(assessment_number==1,date,dates_bw_assessment))
+  
+  # join the student info. MUST do this first to get all the assignments, b/c not studentAssessment file incomplete
+  keep.cols <- c(colnames(ca), "id_student", "date_registration", "final_result", "final_result_encoding")
+  sic <- merge(si, ca, by = c("code_module","code_presentation"))[,keep.cols]
+  return(list(ca=ca,sic=sic))
+}
+
+# mapping the student performance
+map.stud.perf <- function(sic, sa = file.list$studentAssessment){
+  sp <- merge(sic, sa, by = c("id_student", "id_assessment"), all.x = TRUE)
+  # get the average student performance
+  sp <- as.data.frame(plyr::ddply(sp, .(code_module, code_presentation, id_assessment),
+                      mutate, assessment_avg = mean(score, na.rm = TRUE)))
+
+  # create columns for submission, lateness, etc.
+  sp$assessment_submitted <- ifelse(is.na(sp$date_submitted), 0, 1)
+  sp$assessment_late <- with(sp,ifelse(!is.na(date_submitted) & date_submitted <= date, 0, 1))
+  # SCORE = 0 if no submission
+  sp$score <- with(sp, ifelse(is.na(score), 0, score))
+  sp$points_from_avg <- sp$score - sp$assessment_avg
+  return(sp)
+}
+
+student.click.prep <- function(clicks, assgn = c(1,2,3,4)){
+  # get the rows of the assignments, because cumulative clicks counted too
+  sta <- as.data.frame(
+    with(clicks, clicks[assessment_number %in% assgn & !is.na(assessment_type),])
+  )
+  # manipulation
+  cols.to.remove <- c("count_sum_click","assessment_type","date_unregistration")
+  sta <- sta[,!colnames(sta) %in% cols.to.remove]
+
+  # create specific columns for each assignments and its attributes
+  stud.assgn.spread <- r2c.func(
+    sta,assessment_number, 
+    c(score, weight, date, date_submitted, assessment_submitted, assessment_late, 
+      assessment_avg,points_from_avg, clicks_bw_assessments, dates_bw_assessment)
+  )
+  return(stud.assgn.spread)
+}
+
+# final prep
+final.student.prep <- function(sd, ss){
+  # create the final dataframe for analysis
+  fd <- merge(sd, ss, 
+  by = c("id_student", "code_module", "code_presentation","final_result_encoding"), 
+  all.x = TRUE)
+  # remove extra columns from the join
+  fd <- fd[, -grep(".y$", colnames(fd))]
+  # SHOULDN'T BE HARD CODED _ MAY CAUSE AN ERROR IF COLS CHANGE
+  fd[,16:length(fd)] <- apply(fd[,16:length(fd)],2,as.numeric)
+  return(fd)
+}
+
+#Merge the VLE files together to get the activity type of each student click
+map.stud.clicks <- function(sp, sv = file.list$studentVle, v = file.list$vle, csv.w = F){
+  # vle information
+  svi <- merge(sv, v, by=c("id_site","code_module","code_presentation"))
+  spc <- gb.func(svi, "sum_click", "id_student", "code_module", "code_presentation", "date", g.func = sum)
+  
+  # get the assignment dates merged with clicks
+  sf <- merge(spc, sp, by=c("id_student", "code_module", "code_presentation","date"), all = TRUE)
+  sf$count_sum_click <- with(sf, ifelse(is.na(count_sum_click), 0, count_sum_click))
+  # get clicks between assessments
+  sf <- sf %>% 
+    dplyr::group_by(id_student, code_module, code_presentation) %>% 
+    fill(assessment_number, .direction = "up")
+  
+  sf <- as.data.frame(
+    plyr::ddply(sf, .(id_student, code_module, code_presentation, assessment_number),
+              mutate, clicks_bw_assessments = cumsum(count_sum_click))
+  )
+  # order correctly
+  sf <- sf[with(sf,order(id_student, code_module, code_presentation, date)),]
+  if (csv.w == T){
+    write.csv(sf, file="studentFinalClicks.csv")
+  }
+  return(sf)
+}
+
+
+```
+
+The code below contains helper functions for Latent Class Analysis. We utilize the poLCA package in R later on to discover if students fall into latent classes who have different pass / fail rates.
+
+```{r lcahelper, include = TRUE}
+# compute the results for train
+lca.analysis <- function(data, f, k, s, probs.start = NULL) {
+  set.seed(s)
+  class.names <- sapply(1:k, function(k) {paste0("Class_", k)})
+  if(is.null(probs.start)){
+    lca.f <- poLCA(f, data, nclass = k, nrep = 25, tol = .001, verbose = FALSE, graphs = FALSE)
+  }
+  else{
+    lca.f <- poLCA(f, data, nclass = k, nrep = 25, tol = .001, probs.start = probs.start, verbose = FALSE, graphs = FALSE)
+  }
+  # this says the odds-ratio of being in class 2 is LOWER/HIGHER is you pass. 
+  # If negative logit / odds < 1, more likely to be in class 1 than class K.
+  logits <- coef(lca.f)[2,]
+  odds.ratio <- exp(logits)
+  # to make this more interpretable in terms of odds, we can reverse as below:
+  odds.pct <- (odds.ratio-1)*100
+  odds.pass.class <- 1/odds.ratio
+  odds.fail.class <- (odds.pass.class-1)*100
+  # probability of class 1 reference class
+  probs <- logit.to.prob(coef(lca.f)[2,])
+  # FINAL RESULTS
+  lca.logistic.res <- cbind(logits,odds.ratio,odds.pct,
+                            odds.pass.class,odds.fail.class,probs)
+  colnames(lca.logistic.res) <- c("logits", "Odds Ratio Chg in Class if Pass", 
+                                  "Odds Pct Chg in Class if Pass","Odds Ratio Chg in Class if Fail", 
+                                  "Odds Pct Chg in Class if Fail", "Probability")
+  
+  rownames(lca.logistic.res) <- class.names[-1]
+  odds.table <- t(lca.logistic.res)
+  
+  # look at cross-classification table
+  posteriors <- data.frame(lca.f$posterior, predclass=lca.f$predclass) 
+  class.table <-  plyr::ddply(posteriors, .(predclass), function(x) colSums(x[,1:k])) 
+  class.table.perc <- apply(class.table, 2, function(x) x / sum(x))[,-1]
+  rownames(class.table.perc) <- class.names
+  class.table.error <- 1 - sum(diag(class.table.perc)) / sum(class.table.perc)
+  # entropy estimates
+  nume.entr <- -sum(lca.f$posterior * log(lca.f$posterior))
+  ##Denominator (n*log(K)): ## n is a sample size, and K is a number of class
+  deno.entr <- nrow(lca.f$posterior)*log(k)
+  ##Relative Entropy
+  entropy <- 1-(nume.entr/deno.entr)
+  return(list(
+    results=lca.f,
+    odds.table=odds.table,
+    class.table.perc=class.table.perc,
+    class.table.error=class.table.error,
+    entropy=entropy
+  ))
+}
+
+# plots and results for the LCA analysis
+collect.lca.results <- function(df){
+  lca.res.df <- data.frame(
+    k = num.clusters, 
+    lca.bic = sapply(df, function(b) {b$results$bic}),
+    lca.aic = sapply(df, function(a) {a$results$aic}),
+    entropy = sapply(df, function(e) {e$entropy})
+  )
+  with(lca.res.df,{
+    plot(k, lca.aic, type = "l", col = "red", xlab = "Number of Clusters", 
+         ylab = "Estimate", xlim = c(min(k),max(k)), xaxt = "n",
+         ylim = c(min(lca.aic),max(lca.bic)),
+         main = "AIC and BIC vs Number of Clusters")
+    lines(k, lca.bic, col = "blue", xlim = c(min(k),max(k)))
+    axis(1, at = k, labels = k)
+  })
+
+  with(lca.res.df,{
+    plot(k, entropy, type = "b", col = "black", xlab = "Number of Clusters", 
+         ylab = "Estimate", xlim = c(min(k),max(k)), xaxt = "n",
+         ylim = c(min(entropy)-.05,max(entropy)+.05),
+         main = "Entropy vs Number of Clusters")
+    axis(1, at = k, labels = k)
+  })
+  return(lca.res.df)
+}
+
+
+```
+
+The code below contains helper functions for Logistic Regression. We use logistic regression as one of the classification techniques to predict whether a student will pass or fail a class:
+
+```{r logreghelpers, include = TRUE}
+# wrapper for percentages
+table.perc <- function(d) {
+  tbl <- round(rbind(table(d),table(d)/length(d)),3)
+  rownames(tbl) <- c("Actual","Percent")
+  return(tbl)
+}
+
+# accuracy of confusion matrix helper
+accuracy <- function(glm.obj){
+  return(sum(diag(glm.obj$conf.matrix.val) / sum(glm.obj$conf.matrix.val)))
+}
+
+# helper function to look at false positive and negative rates in logistic reg
+compute.lgres <- function(df,m,k,pr.vals){
+  pr.val.comp <- sapply(pr.vals, function(i) {
+    reg.model <- logistic.res(m, df, i)
+    false.pos <- reg.model$conf.matrix.perc[1,2]
+    false.neg <- reg.model$conf.matrix.perc[2,1]
+    acc <- accuracy(reg.model)
+    res <- rbind(false.pos, false.neg, acc)
+    return(res)
+  })
+  colnames(pr.val.comp) <- pr.vals
+  rownames(pr.val.comp) <- c(paste0(k,"_false_pos"), 
+                             paste0(k,"_false_neg"), 
+                             paste0(k,"_acc"))
+  pr.val.comp <- t(pr.val.comp)
+  return(pr.val.comp)
+}
+
+# helper function for logistic regression
+logistic.res <- function(glm.obj, ds, pr) {
+  model.coeff <- 0
+  model.aic <- 0
+  fv <- 0
+  if (typeof(glm.obj) == "list"){
+    model.coeff <- round(cbind(summary(glm.obj)$coef),4)
+    model.aic <- AIC(glm.obj)
+    fv <- ifelse(glm.obj$fitted.values>=pr,1,0)
+  }
+  else{
+    fv <- ifelse(glm.obj>=pr,1,0)
+  }
+  tbl.orig <- table.perc(ds$final_result_encoding)
+  tbl <- table.perc(fv)
+  matrix.val <- table(ds$final_result_encoding, fv)
+  matrix.perc <- round(prop.table(table(ds$final_result_encoding, fv),1),2)
+  res <- list(model.coeff = model.coeff,
+              model.aic = model.aic,
+              tbl.orig = tbl.orig, 
+              tbl.model = tbl,
+              conf.matrix.val = matrix.val,
+              conf.matrix.perc = matrix.perc)
+  return(res)
+}
+
+```
+
+<div style="color:navy;font-size:24px;"><b><u>Exploring the Data</u></b></div>
+<br>
+
+After loading the CSVs into dataframes, we learn more about the data itself. We start with the "Student Info". This dataframe contains demographic information about the students together with their results for the courses / modules they take.
+
+<div style="color:black;font-size:18px;"><b><em>Student Info</em></b></div>
+<br>
+
+In the code below, we make a copy of the "Student Info" CSV. We display the number of distinct values in each column. Note that the number of distinct students is less than the number of rows in the dataframe. The relationship between students and modules is many-to-many. Therefore, duplicate student IDs appear in this dataframe if a student takes more than one module. The rest of the demographic information, however, should be 1-to-1 (i.e. one gender, age group, region, etc. per student).
+
+```{r studentInfoBasic, include=TRUE}
+# making a local copy fine, as dataset not that big. NO withdrawals only
+student.info.nw <- as.data.frame(file.list$studentInfo[file.list$studentInfo$final_result_encoding != -1,])
+# get the registration date into the student info file
+student.info <- merge(student.info.nw, file.list$studentRegistration, by = c("id_student","code_module", "code_presentation"))
+
+# remove outliers from this study, all from similar region
+logged.imd.factors <- sort(unique(student.info$imd_band))[-1]
+student.info <- student.info[student.info$imd_band %in% logged.imd.factors,]
+student.info$imd_band <- as.factor(as.numeric(student.info$imd_band))
+levels(student.info$imd_band) <- logged.imd.factors
+
+
+# NOTE - THERE ARE 9 STUDENTS WHO FAILED BUT STILL UNREGISTERED
+failed.un.register <- student.info[!is.na(student.info$date_unregistration),]
+
+# create late registration column
+student.info$is_late_registration <- ifelse(student.info$date_registration>0,1,0)
+
+#get the number of unqiue values in each column
+unique.instances <- as.data.frame(apply(student.info, 2, function(cl) {length(unique(cl))}))
+colnames(unique.instances) <- c("unique instances")
+unique.instances
+
+# get the length of the dataframe to show the number of student & course pairings
+nrow(student.info)
+
+# number of students by gender
+gb.gender <- gb.func(student.info, "id_student", "gender")
+
+# number of students by imd band
+(gb.imd.band <- gb.func(student.info, "id_student", "imd_band", sort.by.col = F))
+custom.plots$gg.bar(gb.imd.band, "count_id_student", "imd_band", "IMD Band Distribution")
+
+# number of students by age band
+gb.age <- gb.func(student.info, "id_student", "age_band", sort.by.col = F)
+
+# number of students by highest education
+(gb.ed <- gb.func(student.info, "id_student", "highest_education"))
+custom.plots$gg.bar(gb.ed,"count_id_student", "highest_education", "Education Distribution")
+```
+
+The bar charts reveal that some explanatory variables are evenly distributed while others are not. For example, the "IMD Band" - an indicator of socio-economic status in the UK - contains about roughly 10% students in each bucket. Unsurprisingly, prior education is non-uniform. Far more enrollees have a high school diploma or less than students with a college degree or more.
+
+The code below continues the data exploration phase, looking at Pass / Fail rates among different groups.
+
+```{r courseInfoBasic, include=TRUE}
+# number of students by code module
+(gb.student.module <- gb.func(student.info, "id_student", "code_module", sort.by.col = F))
+
+# final grade by education
+(pf.by.ed <- gb.func(student.info, "id_student", "highest_education", "final_result_encoding", sort.by.col = F))
+
+# number of students by code module and final result
+(pf.by.code <- gb.func(student.info, "id_student", "code_module", "final_result_encoding", sort.by.col = F))
+custom.plots$gg.comp.line(pf.by.code, "percent_id_student", "code_module", "final_result_encoding","Pass/Fail Rate by Module")
+
+(pf.by.imd <- gb.func(student.info, "id_student", "imd_band", "final_result_encoding", sort.by.col = F))
+custom.plots$gg.comp.line(pf.by.imd, "percent_id_student", "imd_band", "final_result_encoding","Divergence in Pass/Fail Rate by IMD Band")
+
+# SOME IMPORTANT DIFFERENCES BY MODULE / PRES
+pf.by.code.pres <- gb.func(student.info, "id_student", "code_module", "code_presentation", "final_result_encoding", sort.by.col = F)
+```
+
+In the plots above, the blue line indicates the percentage of students who pass a class, while the red line plots the percentage who fail. Course modules have a roughly consistent Pass-to-Fail ratio, with a couple courses easier than others. IMD Band, on the other hand, does not have a consistent Pass-to-Fail ratio within each group. Students with higher socioeconomic status tend to pass more often than they fail. Substantial research has been done to analyze the effect of wealth and class on school performance, so that will not be the main focus of this analysis, although it is a significant factor that we account for in our predictions.
+
+<div style="color:black;font-size:18px;"><b><em>Modules and Assessments</em></b></div>
+<br>
+
+The code below looks at the available courses and their assessments.
+
+```{r moduleBasic, include=TRUE}
+# merge them together on their shared columns - code_module and code_presentation
+course.assessments.raw <- merge(file.list$courses,file.list$assessments,by=c("code_module","code_presentation"))
+
+course.mod.count <- gb.func(course.assessments.raw, "id_assessment", 
+                            "code_module", "code_presentation", sort.by.col = F)
+
+course.mod.type.count <- gb.func(course.assessments.raw, "id_assessment", 
+                                 "code_module", "code_presentation", "assessment_type", sort.by.col = F)
+
+(assessment.types <- gb.func(course.assessments.raw, "id_assessment", "assessment_type", sort.by.col = T))
+```
+
+We merge the courses and their assessments together. The resulting dataframe contains the course's module number, presentation, and length. For each course, the dataframe includes the assessments and their type, due date, and course weight.
+
+<div style="color:black;font-size:18px;"><b><em>Student Performance</em></b></div>
+<br>
+
+We retrieve the student information data. 
+
+```{r studentPerform, include=TRUE, warning = FALSE, message = 'hide'}
+students.in.courses <- map.stud.course()
+students.performance <- map.stud.perf(students.in.courses$sic)
+
+students.clicks <- file.list$studentsClicks
+students.clicks <- students.clicks[,!colnames(students.clicks) %in% 
+                                     c("X", "percent_sum_click", "id_assessment", 
+                                       "module_presentation_length", "is_banked")]
+
+head(students.clicks[,c("id_student","code_module","code_presentation","date",
+                   "count_sum_click","assessment_number","clicks_bw_assessments")])
+```
+
+
+The table above is a sneak peak of the students.clicks dataframe. It shows some of the important columns. The "assessment_number" is a given assignment's position in the module. The date is a given day, where 0 is the courses start date. "count_sum_click" is the total number of clicks on the VLE from a given student on a given day. "clicks_bw_assessments" are the cumulative clicks from a given student in between each assessment. Negative dates correspond to clicks from a student prior to the courses start date. They are counted as before the first assessment.  
+
+<div style="color:navy;font-size:24px;"><b><u>Latent Class Analysis</u></b></div>
+<br>  
+
+We strive to predict whether a student will pass or fail a class, yet we know that the Pass/Fail rate is significantly different depending on demographics. Therefore, we start with Latent Class Analysis to see if we can come up with interpretable subgroups within the overall population. 
+
+We run LCA for clusters 2-5, selecting the best cluster based on analysis of BIC, AIC, and entropy for each $k$.
+  
+```{r lcaalgo, include=TRUE}
+#lca train and test data
+set.seed(1019)
+sample.arr <- 1:nrow(student.info)
+indices <- sample(sample.arr,.7*length(sample.arr))
+student.train <- student.info[indices,]
+student.test <- student.info[-indices,]
+
+# function for train and test
+lca.f.train.trim <- with(student.train, cbind(imd_band,highest_education,gender,age_band,region) ~ final_result_encoding)
+lca.f.test.trim <- with(student.test, cbind(imd_band,highest_education,gender,age_band,region) ~ final_result_encoding)
+
+# creating the training data for lca and applying the functions
+num.clusters <- 2:5
+lca.res.train <- lapply(num.clusters, function(k) lca.analysis(student.train, lca.f.train.trim, k, 17))
+
+# show results from all LCA
+collect.lca.results(lca.res.train)
+
+# show best LCA results
+best.lca.train <- lca.res.train[[2]]
+best.lca.train$results
+as.data.frame(round(best.lca.train$odds.table,3))
+
+student.train.lca <- cbind(student.train, best.lca.train$results$posterior, best.lca.train$results$predclass)
+colnames(student.train.lca) <- c(colnames(student.train.lca)[-ncol(student.train.lca)],"predclass")
+
+student.train.lca.group <- gb.func(student.train.lca, "id_student", "predclass","final_result_encoding", sort.by.col = F)
+custom.plots$gg.comp.line(student.train.lca.group, "percent_id_student",
+                          "predclass","final_result_encoding", 
+                          "Difference in P/F rate by Latent Class")
+
+
+```
+
+Now holdout analysis for LCA
+
+```{r holdouttestinglca, include = TRUE}
+# create lca function ready for test
+n <- 3
+lca.res.test <- lca.analysis(student.test, lca.f.test.trim, 3, 37, probs.start = best.lca.train$results$probs)
+lca.res.test$results
+lca.res.test$odds.table
+lca.res.test$entropy
+
+student.test.lca <- cbind(student.test, lca.res.test$results$posterior, lca.res.test$results$predclass)
+colnames(student.test.lca) <- c(colnames(student.test.lca)[-ncol(student.test.lca)], "predclass")
+
+(student.test.lca.group <- gb.func(student.test.lca,"id_student", "predclass","final_result_encoding", sort.by.col = F))
+custom.plots$gg.comp.line(student.test.lca.group, "percent_id_student",
+                          "predclass","final_result_encoding", 
+                          "Difference in P/F rate by Latent Class")
+
+```
+
+Odds plot for LCA
+
+```{r oddsplotforlca, include = TRUE}
+
+# ODDS PLOT
+# Create labels
+labels <- c("Ref Class", "Class 2 Train", "Class 2 Test", "Class 3 Train", "Class 3 Test")
+
+# coefficients come directly from the odds tables for train and test
+qnorm.conf <- qnorm(c(0.025,0.5,0.975))
+
+ci.class1.base <- exp(0 + qnorm.conf * 0.00)
+ci.class2.train <- exp(0.74922 + qnorm.conf * 0.05252)
+ci.class3.train <- exp(1.18977 + qnorm.conf * 0.08074)
+ci.class2.test <- exp(0.74669 + qnorm.conf * 0.08340)
+ci.class3.test <- exp(1.21515 + qnorm.conf * 0.13664)
+collect.all.lca.odds <- rbind(ci.class1.base,ci.class2.train,ci.class2.test,ci.class3.train,ci.class3.test)
+
+df.odds.plot <- data.frame(
+  yAxis = length(labels):1,
+  boxOdds = collect.all.lca.odds[,2],
+  boxCILow = collect.all.lca.odds[,1],
+  boxCIHigh = collect.all.lca.odds[,3]
+)
+
+odds.p <- ggplot(df.odds.plot, aes(x = boxOdds, y = yAxis))
+odds.p + geom_vline(aes(xintercept = 1), size = .75, linetype = "dashed", color = "black") +
+  geom_errorbarh(aes(xmax = boxCIHigh, xmin = boxCILow), size = .5, height = .2, color = "black") +
+  geom_point(size = 3.5, color = "orange") +
+  theme(panel.grid.minor = element_blank()) +
+  scale_y_continuous(breaks = df.odds.plot$yAxis, labels = labels) +
+  scale_x_continuous(breaks = seq(0,7,1) ) +
+  coord_trans(x = "log10") +
+  ylab("") +
+  xlab("Odds ratio (log scale)") +
+  ggtitle("Increase in P/F Odds Based on Latent Class Assignment")
+
+```
+
+Logistic regression
+
+```{r logisticregression, include = T, warning = F}
+
+# return all clicks results with spread so assessment numbers equal columns
+student.results <- student.click.prep(students.clicks)
+student.results$assess12 <- student.results$`1_assessment_submitted`+student.results$`2_assessment_submitted`
+# make the train and test sets
+class.split.helper <- function(df,k) {with(df, df[predclass==k,])}
+students.final.train.df <- final.student.prep(student.train.lca,student.results)
+students.final.train.1 <- class.split.helper(students.final.train.df,1)
+students.final.train.2 <- class.split.helper(students.final.train.df,2)
+students.final.train.3 <- class.split.helper(students.final.train.df,3)
+
+# test data
+students.final.test.df <- final.student.prep(student.test.lca,student.results)
+
+#write.csv(students.final.train.df, "student.clicks.train.csv")
+#write.csv(students.final.test.df, "student.clicks.test.csv")
+
+# HARD CODED RIGHT NOW TO SHOW 1-3 ASSIGNMENTS
+after.score.123 <- function(df, pr.vals = seq(0.4, 0.8, 0.02)){
+  after.score.1 <- glm(final_result_encoding~code_module+code_presentation+
+                         num_of_prev_attempts+`1_clicks_bw_assessments`+
+                         `1_score`*`1_weight`+as.factor(`1_assessment_submitted`), 
+                       data=df,family="binomial")
+  
+  after.score.2 <- glm(final_result_encoding~code_module+code_presentation+num_of_prev_attempts+
+                      `1_clicks_bw_assessments`+`2_clicks_bw_assessments`+
+                       `1_score`*`1_weight`+as.factor(`1_assessment_submitted`)+
+                        `2_score`*`2_weight`+as.factor(`2_assessment_submitted`)+
+                        assess12,
+                     data=df,family="binomial")
+
+  # NOT USING ASSIGNMENT 3 RIGHT NOW
+  after.score.3 <- glm(final_result_encoding~code_module+code_presentation+num_of_prev_attempts+
+                      `1_clicks_bw_assessments`+`2_clicks_bw_assessments`+`3_clicks_bw_assessments`+
+                      `1_score`*`1_weight`+as.factor(`1_assessment_submitted`)+
+                      `2_score`*`2_weight`+as.factor(`2_assessment_submitted`)+
+                      `3_score`*`3_weight`+as.factor(`3_assessment_submitted`),
+                    data=df,family="binomial")
+  
+  after.1.res <- compute.lgres(df,after.score.1,1,pr.vals)
+  after.2.res <- compute.lgres(df,after.score.2,2,pr.vals)
+  after.3.res <- compute.lgres(df,after.score.3,3,pr.vals)
+  res <- list(log.1 = after.score.1,
+              log.2 = after.score.2,
+              log.3 = after.score.3,
+              logres.1 = after.1.res,
+              logres.2 = after.2.res,
+              logres.3 = after.3.res,
+              all = cbind(after.1.res,after.2.res,after.3.res))
+  return(res)
+}
+
+# REGRESSIONS USED FOR THE ROC PLOTS
+logres.all <- after.score.123(students.final.train.df)
+logres.class.1 <- after.score.123(students.final.train.1)
+logres.class.2 <- after.score.123(students.final.train.2)
+logres.class.3 <- after.score.123(students.final.train.3)
+
+all.log.res.class.only <- glm(final_result_encoding~code_module+code_presentation+`1`+`2`+`3`+
+                         num_of_prev_attempts,
+                       data=students.final.train.df,family="binomial")
+
+all.log.res.class.only.test <- predict(all.log.res.class.only, newdata = students.final.test.df, type="response")
+
+
+all.log.res.1 <- glm(final_result_encoding~code_module+code_presentation+`1`+`2`+`3`+
+                         num_of_prev_attempts+`1_clicks_bw_assessments`+`1_assessment_submitted`,
+                       data=students.final.train.df,family="binomial")
+
+all.log.res.1.test <- predict(all.log.res.1, newdata = students.final.test.df, type="response")
+
+all.log.res.12 <- glm(final_result_encoding~code_module+code_presentation+`1`+`2`+`3`+
+                         num_of_prev_attempts+`1_clicks_bw_assessments`+`2_clicks_bw_assessments`+
+                         `1_assessment_submitted`+`2_assessment_submitted`, 
+                       data=students.final.train.df,family="binomial")
+
+all.log.res.12.test <- predict(all.log.res.12, newdata = students.final.test.df, type="response")
+
+logistic.res(all.log.res.class.only,students.final.train.df,0.7)
+logistic.res(all.log.res.1,students.final.train.df,0.7)
+logistic.res(all.log.res.12,students.final.train.df,0.7)
+#(class.as.predictor <- compute.lgres(students.final.train.df,all.log.res,"all",seq(0.5, 0.8, 0.02)))
+#round(summary(all.log.res)$coefficients,4)
+```
+
+```{r logresresultsproblem, include=TRUE}
+
+# ----------- NOTICE - MAJOR ISSUE WITH MULTICOLLINEARITY IN MULTIPLE ASSIGNMENTS ---------- #
+# ----------- STUDENTS WHO SUBMITTED FIRST TWO ASSIGNMENTS WAY MORE LIKELY TO DO IT AGAIN ---------- #
+
+#round(summary(logres.all$log.1)$coefficients,4)
+#round(summary(logres.all$log.2)$coefficients,4)
+#round(summary(logres.all$log.3)$coefficients,4)
+
+# ----------- THEREFORE - LET'S GO WITH JUST THE FIRST ASSIGNMENT FOR NOW ---------- #
+# ----------- COLLECT THE DIFFERENCES BETWEEN OVERALL INTERPRETABILITY SEPARATING CLASSES ---------- #
+
+grand.rate <- (table(students.final.train.df$final_result_encoding) / sum(table(students.final.train.df$final_result_encoding)))[2]
+rate.1 <- (table(students.final.train.1$final_result_encoding) / sum(table(students.final.train.1$final_result_encoding)))[2]
+rate.2 <- (table(students.final.train.2$final_result_encoding) / sum(table(students.final.train.2$final_result_encoding)))[2]
+rate.3 <- (table(students.final.train.3$final_result_encoding) / sum(table(students.final.train.3$final_result_encoding)))[2]
+
+# Data Exploration TEsts
+reppp <- function(p.val){
+  all <- all.res$conf.matrix.val
+  fp.all <- cbind(all,apply(all,1,sum))
+  res.all <- c(fp.all[1,2]/fp.all[1,3],fp.all[2,1]/fp.all[2,3],sum(diag(fp.all[,-3]))/sum(fp.all[,-3]))
+  summed <- on.1.res$conf.matrix.val+on.2.res$conf.matrix.val+on.3.res$conf.matrix.val
+  fp.summed <- cbind(summed,apply(summed,1,sum))
+  res.summed <- c(fp.summed[1,2]/fp.summed[1,3],fp.summed[2,1]/fp.summed[2,3],sum(diag(fp.summed[,-3]))/sum(fp.summed[,-3]))
+  p.c <- rep(p.val,3)
+  p.res <- c("fp","fn","acc")
+  f <- cbind(p.c,p.res,round(res.all,3),round(res.summed,3))
+  colnames(f) <- c("cb","stat","all","specific")
+  return(as.data.frame(f))
+}
+
+# class splitting for test data
+test.data.1 <- class.split.helper(students.final.test.df,1)
+test.data.2 <- class.split.helper(students.final.test.df,2)
+test.data.3 <- class.split.helper(students.final.test.df,3)
+
+test.1 <- ifelse(predict(logres.class.1$log.1, newdata = test.data.1, type="response")>0.7,1,0)
+test.2 <- ifelse(predict(logres.class.2$log.1, newdata = test.data.2, type="response")>0.7,1,0)
+test.3 <- ifelse(predict(logres.class.3$log.1, newdata = test.data.3, type="response")>0.7,1,0)
+
+fin.f <- c(logres.class.1$log.1$fitted.values,logres.class.2$log.1$fitted.values,logres.class.3$log.1$fitted.values)
+fin.f10 <- ifelse(c(logres.class.1$log.1$fitted.values,logres.class.2$log.1$fitted.values,logres.class.3$log.1$fitted.values)>0.7,1,0)
+fin.c <- c(students.final.train.1$final_result_encoding,students.final.train.2$final_result_encoding,
+           students.final.train.3$final_result_encoding)
+fin.f.test <- c(test.1,test.2,test.3)
+fin.c.test <- c(test.data.1$final_result_encoding,
+                test.data.2$final_result_encoding,
+                test.data.3$final_result_encoding)
+(train.conf <- round(prop.table(table(fin.c,fin.f10),1),2))
+(test.conf <- round(prop.table(table(fin.c.test,fin.f.test),1),2))
+
+#f.end <- r2c.func(plyr::ldply(lapply(seq(0.5,0.8,by=0.02),reppp),data.frame),stat,c(all,specific))
+#f.end
+
+# GENERATE THE ROC PLOTS
+
+rocobj2.tr <- plot.roc(fin.c,
+                        fin.f,
+                        main="ROC Comparison: Accounting for Latent Class w/ Assessment 1 Model",
+                        thresholds="best", # select the (best) threshold
+                        print.thres="best",
+                        percent=TRUE, 
+                        col="#008600")
+rocobj1.tr <- lines.roc(students.final.train.df$final_result_encoding, 
+                    logres.all$log.1$fitted.values,
+                    percent=TRUE,
+                    col="#1c61b6")
+
+
+# GENERATE THE ROC PLOTS FOR TEST ANALYSIS
+rocobj1.tst <- plot.roc(students.final.test.df$final_result_encoding, 
+                    all.log.res.class.only.test,
+                    main="ROC Comparison: Logistic Regression",
+                    percent=TRUE,
+                    col="red")
+rocobj2.tst <- lines.roc(students.final.test.df$final_result_encoding, 
+                     all.log.res.1.test, 
+                     percent=TRUE, 
+                     col="#008600",
+                     type="l")
+rocobj3.tst <- lines.roc(students.final.test.df$final_result_encoding, 
+                     all.log.res.12.test, 
+                     percent=TRUE, 
+                     col="#1c61b6")
+testobj <- roc.test(rocobj2.tr, rocobj1.tr)
+testobj2 <- roc.test(rocobj2.tst, rocobj3.tst)
+text(45, 40, labels=paste("P.Value Blue & Green: ", format.pval(testobj$p.value)), adj=c(0, .5))
+text(45, 30, labels=paste("P.Value Green & Blue: ", format.pval(testobj2$p.value)), adj=c(0, .5))
+legend("bottomright", 
+      legend=c("Student Profile Only", "Adding Assessment 1", "Adding Assessment 1 & 2"), 
+       col=c("red","#008600","#1c61b6"), lwd=2)
+
+fin.c <- ifelse(fin.c==1,TRUE,FALSE)
+#fin <- ifelse(fin.f==1,TRUE,FALSE)
+#logi.hist.plot(fin.f,fin.c,boxp=FALSE,type="hist",col="gray", main = "Logistic Regression Results From Class Separation")
+```
+
+LDA - Note, tried within LCA as well, results not as good as Logistic
+
+```{r lda, include = TRUE}
+# LDA model using training dataset to predict final_result_encoding
+lda.full <- qda(final_result_encoding~code_module+code_presentation+num_of_prev_attempts+
+                    `1_clicks_bw_assessments`+
+                    `1_score`+
+                    `1_assessment_submitted`,
+                  data=students.final.train.df)
+
+
+# Prediction on training data
+lda.full.predict <- predict(lda.full)$class
+
+# Prediction on holdout data with full model trained above
+lda.test <- predict(lda.full,newdata=students.final.test.df)$class
+
+# Confusion matrix of training data compared to actual
+(train_tbl_lda <- table(students.final.train.df$final_result_encoding,lda.full.predict))
+(train_prop_lda <- round(prop.table(table(students.final.train.df$final_result_encoding,lda.full.predict),1),2))
+(sum(diag(train_tbl_lda))/sum(train_tbl_lda))
+
+# Confusion matrix of holdout data compared to actual
+(test_tbl_lda <- table(students.final.test.df[,5],lda.test))
+(test_prop_lda <- round(prop.table(table(students.final.test.df[,5],lda.test),1),2))
+(sum(diag(test_tbl_lda))/sum(test_tbl_lda))
+
+# QDA model using training dataset to predict final_result_encoding
+qda.full <- qda(final_result_encoding~code_module+code_presentation+num_of_prev_attempts+
+                    `1_clicks_bw_assessments`+
+                    `1_score`+
+                    `1_assessment_submitted`+
+                    `1_assessment_submitted`,
+                  data=students.final.train.df)
+
+# Prediction on training data
+qda.full.predict <- predict(qda.full)$class
+
+# Prediction on holdout data with full model trained above
+qda.test <- predict(qda.full,newdata=students.final.test.df)$class
+
+# Confusion matrix of training data compared to actual
+(train_tbl_qda <- table(students.final.train.df[,5],qda.full.predict))
+(train_prop_qda <- round(prop.table(table(students.final.train.df[,5],qda.full.predict),1),2))
+(sum(diag(train_tbl_qda))/sum(train_tbl_qda))
+
+# Confusion matrix of holdout data compared to actual
+(test_tbl_qda <- table(students.final.test.df[,5],qda.test))
+(test_prop_qda <- round(prop.table(table(students.final.test.df[,5],qda.test),1),2))
+(sum(diag(test_tbl_qda))/sum(test_tbl_qda))
+```
+
+Finally, random forest with for assignment 1 as well.
+
+```{r randoforest, include = TRUE}
+# Create the random forest for train
+
+colnames(students.final.train.df)[c(22,23,28)] <- c("assessment_1_submitted","clicks_bw_assessments_1","score_1")
+colnames(students.final.test.df)[c(22,23,28)] <- c("assessment_1_submitted","clicks_bw_assessments_1","score_1")
+output.forest.train <- randomForest(final_result_encoding~code_module+code_presentation+num_of_prev_attempts+
+                                      assessment_1_submitted+clicks_bw_assessments_1+score_1,data=students.final.train.df)
+
+# train confusion matrix
+zp=output.forest.train$predicted
+zp[zp>=0.7]=1
+zp[zp<0.7]=0
+table(students.final.train.df$final_result_encoding,zp)
+round(prop.table(table(students.final.train.df$final_result_encoding,zp),1),2)
+
+# Create the random forest for test
+rf.test <- predict(output.forest.train,newdata=students.final.test.df)
+
+# test confusion matrix
+xp=rf.test
+xp[xp>=0.7]=1
+xp[xp<0.7]=0
+table(students.final.test.df$final_result_encoding,xp)
+round(prop.table(table(students.final.test.df$final_result_encoding,xp),1),2)
+
+```
